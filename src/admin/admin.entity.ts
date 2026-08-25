@@ -1,43 +1,55 @@
-// schema: admin_tb
-// admin_id
-// admin_full_name
-// admin_email
-// admin_password
-// admin_role
-// admin_status
-// admin_department_id
-// admin_create_date
-
 import {
-  Entity,
-  PrimaryGeneratedColumn,
   Column,
   CreateDateColumn,
+  Entity,
+  JoinColumn,
+  ManyToOne,
+  PrimaryGeneratedColumn,
+  UpdateDateColumn,
 } from 'typeorm';
+import { Role } from '../common/enums/role.enum';
+import { DepartmentTb } from '../departments/department.entity';
 
+/**
+ * บัญชีที่ต้อง login (แอดมิน) - แม็พกับตาราง admin_tb ผู้แจ้งปัญหาทั่วไปไม่ต้องมีบัญชีในตารางนี้
+ *
+ * department_id: null = super admin เห็นทุกแผนก, ไม่ null = แอดมินแผนกนั้นแผนกเดียว
+ */
 @Entity('admin_tb')
-export class AdminEntity {
+export class AdminTb {
   @PrimaryGeneratedColumn({ name: 'admin_id' })
   admin_id!: number;
 
-  @Column()
-  admin_full_name!: string;
+  @Column({ name: 'admin_full_name' })
+  full_name!: string;
 
-  @Column()
-  admin_email!: string;
+  @Column({ name: 'admin_email', unique: true })
+  email!: string;
 
-  @Column()
-  admin_password!: string;
+  /** select: false ป้องกันไม่ให้ password หลุดออกมาใน query ทั่วไปโดยไม่ตั้งใจ */
+  @Column({ name: 'admin_password_hash', select: false })
+  password!: string;
 
-  @Column()
-  admin_role!: string;
+  @Column({ name: 'admin_role', type: 'varchar', default: Role.ADMIN })
+  role!: Role;
 
-  @Column()
-  admin_status!: string;
+  @Column({ name: 'admin_is_active', default: true })
+  is_active!: boolean;
 
-  @Column()
-  admin_department_id!: string;
+  @ManyToOne(() => DepartmentTb, {
+    eager: true,
+    nullable: true,
+    onDelete: 'RESTRICT',
+  })
+  @JoinColumn({ name: 'admin_department_id' })
+  department!: DepartmentTb | null;
+
+  @Column({ name: 'admin_department_id', type: 'int', nullable: true })
+  department_id!: number | null;
 
   @CreateDateColumn({ name: 'admin_create_date' })
-  admin_create_date!: Date;
+  created_at!: Date;
+
+  @UpdateDateColumn({ name: 'admin_updated_date' })
+  updated_at!: Date;
 }
