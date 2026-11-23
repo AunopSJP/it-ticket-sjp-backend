@@ -13,20 +13,20 @@ import {
 @Entity('reporter_tb')
 export class UserTb {
   @PrimaryGeneratedColumn({ name: 'reporter_id' })
-  user_id: number;
+  user_id!: number;
 
   @Column({ name: 'reporter_line_user_id', unique: true })
-  line_user_id: string;
+  line_user_id!: string;
 
   @Column({ name: 'reporter_line_display_name', type: 'varchar', nullable: true })
-  line_display_name: string | null;
+  line_display_name!: string | null;
 
   @Column({ name: 'reporter_line_picture_url', type: 'varchar', nullable: true })
-  line_picture_url: string | null;
+  line_picture_url!: string | null;
 
   @CreateDateColumn({ name: 'reporter_created_at' })
-  created_at: Date;
+  created_at!: Date;
 
   @UpdateDateColumn({ name: 'reporter_updated_at' })
-  updated_at: Date;
+  updated_at!: Date;
 }

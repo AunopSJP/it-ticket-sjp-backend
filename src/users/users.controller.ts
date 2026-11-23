@@ -70,7 +70,7 @@ export class UsersController {
   @Get('notifications')
   @Throttle(THROTTLE_STANDARD)
   async listNotifications(@Query('line_id_token') line_id_token: string) {
-    const user = await this.findUserFromToken(line_id_token);
+    const user = await this.findUserFromToken(line_id_token, { throwOnInvalid: true });
     if (!user) {
       // ยังไม่เคยแจ้งตั๋วมาก่อน (หรือ token verify ไม่ผ่าน) - ถือว่าไม่มีแจ้งเตือน ไม่ error
       return [];
@@ -81,7 +81,7 @@ export class UsersController {
   @Get('notifications/recent')
   @Throttle(THROTTLE_STANDARD)
   async listRecent(@Query('line_id_token') line_id_token: string) {
-    const user = await this.findUserFromToken(line_id_token);
+    const user = await this.findUserFromToken(line_id_token, { throwOnInvalid: true });
     if (!user) {
       return { items: [], unread_count: 0 };
     }

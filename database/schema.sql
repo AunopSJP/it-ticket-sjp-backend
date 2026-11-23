@@ -99,6 +99,9 @@ CREATE TABLE "ticket_tb" (
   "ticket_sla_breached" boolean NOT NULL DEFAULT false,
   "ticket_sla_warning_notified_at" timestamptz,
   "ticket_sla_breach_notified_at" timestamptz,
+  "ticket_assign_breach_notified_at" timestamptz,
+  "ticket_deadline_warning_notified_at" timestamptz,
+  "ticket_deadline_breach_notified_at" timestamptz,
   "ticket_wait_started_at" timestamptz,
   "ticket_sla_paused_ms" bigint NOT NULL DEFAULT 0,
 

@@ -24,10 +24,18 @@ export class AdminsService {
   }
 
   async findAllForSuperAdmin(requestingUser: AdminTb): Promise<AdminTb[]> {
-    if (requestingUser.department_id !== null) {
-      throw new ForbiddenException('เฉพาะผู้ดูแลระบบ (super admin) เท่านั้นที่ดูบัญชีแอดมินทั้งหมดได้');
+    if (requestingUser.role === Role.SUPER_ADMIN && requestingUser.department_id === null) return this.findAll();
+    if (requestingUser.role === Role.HEAD_ADMIN && requestingUser.department_id !== null) {
+      return (await this.findAll()).filter((user) => user.department_id === requestingUser.department_id);
     }
-    return this.findAll();
+    throw new ForbiddenException('ไม่มีสิทธิ์ดูบัญชีแอดมิน');
+  }
+
+  private async managedAdmin(admin_id: number, requestingUser: AdminTb): Promise<AdminTb> {
+    const target = await this.findById(admin_id);
+    if (requestingUser.role === Role.SUPER_ADMIN && requestingUser.department_id === null) return target;
+    if (requestingUser.role === Role.HEAD_ADMIN && target.role === Role.ADMIN && target.department_id === requestingUser.department_id) return target;
+    throw new ForbiddenException('ไม่มีสิทธิ์จัดการบัญชีนี้');
   }
 
   async findById(admin_id: number): Promise<AdminTb> {
@@ -43,7 +51,7 @@ export class AdminsService {
     return this.adminsRepo.findByEmailWithPassword(email);
   }
 
-  async create(dto: CreateAdminInput): Promise<AdminTb> {
+  async create(dto: CreateAdminInput, role: Role = Role.ADMIN): Promise<AdminTb> {
     const email = dto.email.toLowerCase().trim();
     const existing = await this.adminsRepo.findByEmail(email);
     if (existing) {
@@ -55,7 +63,7 @@ export class AdminsService {
       full_name: dto.full_name,
       email,
       password: hashedPassword,
-      role: Role.ADMIN,
+      role,
       department_id: dto.department_id ?? null,
     });
     const saved = await this.adminsRepo.save(user);
@@ -63,10 +71,25 @@ export class AdminsService {
   }
 
   async createBySuperAdmin(dto: CreateAdminInput, requestingUser: AdminTb): Promise<AdminTb> {
-    if (requestingUser.department_id !== null) {
+    if (requestingUser.role !== Role.SUPER_ADMIN || requestingUser.department_id !== null) {
       throw new ForbiddenException('เฉพาะผู้ดูแลระบบ (super admin) เท่านั้นที่สร้างบัญชีแอดมินใหม่ได้');
     }
-    return this.create(dto);
+    const role = dto.role === 'super_admin'
+      ? Role.SUPER_ADMIN
+      : dto.role === 'head_admin'
+        ? Role.HEAD_ADMIN
+        : Role.ADMIN;
+    if (role === Role.SUPER_ADMIN && dto.department_id !== undefined && dto.department_id !== null) {
+      throw new ForbiddenException('super admin ต้องไม่ผูกกับแผนก');
+    }
+    if (role !== Role.SUPER_ADMIN && (dto.department_id === undefined || dto.department_id === null)) {
+      throw new ForbiddenException('admin และ head admin ต้องผูกกับแผนก');
+    }
+    if (role === Role.HEAD_ADMIN && dto.department_id !== undefined && dto.department_id !== null) {
+      const headCount = await this.adminsRepo.countHeadAdminsByDepartment(dto.department_id);
+      if (headCount >= 2) throw new ConflictException('แต่ละแผนกมี head admin ได้สูงสุด 2 คน');
+    }
+    return this.create(dto, role);
   }
 
   /** ปิด/เปิดบัญชีตัวเองไม่ได้เด็ดขาด
@@ -78,14 +101,11 @@ export class AdminsService {
     is_active: boolean,
     requestingUser: AdminTb,
   ): Promise<{ user: AdminTb; active_assigned_ticket_count: number }> {
-    if (requestingUser.department_id !== null) {
-      throw new ForbiddenException('เฉพาะผู้ดูแลระบบ (super admin) เท่านั้นที่เปิด/ปิดใช้งานบัญชีแอดมินคนอื่นได้');
-    }
     if (admin_id === requestingUser.admin_id) {
       throw new ForbiddenException('ไม่สามารถจัดการบัญชีของตัวเองได้');
     }
 
-    await this.findById(admin_id); // ตรวจสอบว่ามี user นี้จริงไหม (ถ้าไม่มีจะ throw 404)
+    await this.managedAdmin(admin_id, requestingUser);
 
     await this.adminsRepo.updateFields(admin_id, { is_active });
 
@@ -99,14 +119,11 @@ export class AdminsService {
 
   /** ลบบัญชีแอดมิน - เฉพาะ super admin (department_id null) เท่านั้นที่เรียกได้ (กันไม่ให้ลบบัญชีตัวเอง) */
   async remove(admin_id: number, requestingUser: AdminTb): Promise<void> {
-    if (requestingUser.department_id !== null) {
-      throw new ForbiddenException('เฉพาะผู้ดูแลระบบ (super admin) เท่านั้นที่ลบบัญชีแอดมินคนอื่นได้');
-    }
     if (admin_id === requestingUser.admin_id) {
       throw new ForbiddenException('ไม่สามารถจัดการบัญชีของตัวเองได้');
     }
 
-    await this.findById(admin_id);
+    await this.managedAdmin(admin_id, requestingUser);
     await this.adminsRepo.remove(admin_id);
   }
 
@@ -116,11 +133,7 @@ export class AdminsService {
     email: string,
     requestingUser: AdminTb,
   ): Promise<AdminTb> {
-    if (requestingUser.department_id !== null) {
-      throw new ForbiddenException('เฉพาะผู้ดูแลระบบ (super admin) เท่านั้นที่แก้ไขข้อมูลแอดมินคนอื่นได้');
-    }
-
-    await this.findById(admin_id); // ตรวจสอบว่ามี user นี้จริงไหม
+    await this.managedAdmin(admin_id, requestingUser);
 
     const normalizedEmail = email.toLowerCase().trim();
     const existing = await this.adminsRepo.findByEmail(normalizedEmail);
@@ -138,11 +151,7 @@ export class AdminsService {
     new_password: string,
     requestingUser: AdminTb,
   ): Promise<AdminTb> {
-    if (requestingUser.department_id !== null) {
-      throw new ForbiddenException('เฉพาะผู้ดูแลระบบ (super admin) เท่านั้นที่ตั้งรหัสผ่านใหม่ให้แอดมินคนอื่นได้');
-    }
-
-    await this.findById(admin_id); // ตรวจสอบว่ามี user นี้จริงไหม
+    await this.managedAdmin(admin_id, requestingUser);
 
     const hashedPassword = await bcrypt.hash(new_password, BCRYPT_SALT_ROUNDS);
     await this.adminsRepo.updateFields(admin_id, { password: hashedPassword });
@@ -158,11 +167,16 @@ export class AdminsService {
     department_id: number | null,
     requestingUser: AdminTb,
   ): Promise<AdminTb> {
-    if (requestingUser.department_id !== null) {
+    if (requestingUser.role !== Role.SUPER_ADMIN || requestingUser.department_id !== null) {
       throw new ForbiddenException('เฉพาะผู้ดูแลระบบ (super admin) เท่านั้นที่กำหนดแผนกของแอดมินคนอื่นได้');
     }
 
     await this.findById(admin_id); // ตรวจสอบว่ามี user นี้จริงไหม
+
+    const targetRole = (await this.findById(admin_id)).role;
+    if (targetRole === Role.SUPER_ADMIN && department_id !== null) {
+      throw new ForbiddenException('super admin ต้องไม่ผูกกับแผนก');
+    }
 
     await this.adminsRepo.updateFields(admin_id, { department_id });
     return this.findById(admin_id);

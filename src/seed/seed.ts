@@ -208,7 +208,15 @@ async function run() {
   const userRepo = dataSource.getRepository(AdminTb);
   const existingAdmin = await userRepo.findOne({ where: { email: adminEmail } });
   if (existingAdmin) {
-    console.log(`↷ ข้ามบัญชีแอดมิน "${adminEmail}" (มีอยู่แล้ว)`);
+    if (existingAdmin.role !== Role.SUPER_ADMIN || existingAdmin.department_id !== null) {
+      await userRepo.update(
+        { admin_id: existingAdmin.admin_id },
+        { role: Role.SUPER_ADMIN, department_id: null },
+      );
+      console.log(`🔐 ยกระดับบัญชี "${adminEmail}" เป็น super admin แล้ว`);
+    } else {
+      console.log(`↷ ข้ามบัญชีแอดมิน "${adminEmail}" (เป็น super admin อยู่แล้ว)`);
+    }
   } else {
     const hashedPassword = await bcrypt.hash(seedPassword, 10);
     await userRepo.save(
@@ -216,7 +224,7 @@ async function run() {
         full_name: requiredEnv('SEED_ADMIN_NAME'),
         email: adminEmail,
         password: hashedPassword,
-        role: Role.ADMIN,
+        role: Role.SUPER_ADMIN,
       }),
     );
     console.log(`✅ สร้างบัญชีแอดมิน "${adminEmail}" แล้ว`);

@@ -124,6 +124,16 @@ export class TicketTb {
   @Column({ name: 'ticket_sla_breach_notified_at', type: 'timestamptz', nullable: true })
   sla_breach_notified_at: Date | null;
 
+  @Column({ name: 'ticket_assign_breach_notified_at', type: 'timestamptz', nullable: true })
+  assign_breach_notified_at: Date | null;
+
+  @Column({ name: 'ticket_deadline_warning_notified_at', type: 'timestamptz', nullable: true })
+  deadline_warning_notified_at: Date | null;
+
+  @Column({ name: 'ticket_deadline_breach_notified_at', type: 'timestamptz', nullable: true })
+  deadline_breach_notified_at: Date | null;
+
+
   /** เวลาที่เข้าสถานะ Wait ล่าสุด (null ถ้าไม่ได้อยู่ในสถานะ Wait) ใช้คำนวณเวลาที่ SLA clock หยุดนับ */
   @Column({ name: 'ticket_wait_started_at', type: 'timestamptz', nullable: true })
   wait_started_at: Date | null;

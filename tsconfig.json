@@ -11,7 +11,6 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "baseUrl": "./",
-    "ignoreDeprecations": "5.0",
     "incremental": true,
     "skipLibCheck": true,
     "strictNullChecks": true,
@@ -22,5 +21,11 @@
     "esModuleInterop": true
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dist", "shared", "test", "_legacy_backup_20260824"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "shared",
+    "test",
+    "_legacy_backup_20260824"
+  ]
 }

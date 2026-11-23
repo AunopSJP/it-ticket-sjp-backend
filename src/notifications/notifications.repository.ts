@@ -18,7 +18,10 @@ export class NotificationsRepository {
     return this.adminsRepo.find({
       where: [
         { role: Role.ADMIN, is_active: true, department_id },
+        { role: Role.HEAD_ADMIN, is_active: true, department_id },
         { role: Role.ADMIN, is_active: true, department_id: IsNull() },
+        { role: Role.HEAD_ADMIN, is_active: true, department_id: IsNull() },
+        { role: Role.SUPER_ADMIN, is_active: true, department_id: IsNull() },
       ],
     });
   }

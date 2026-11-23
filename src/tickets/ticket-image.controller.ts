@@ -1,7 +1,7 @@
 import { Controller, Get, NotFoundException, Param, ParseIntPipe, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Response } from 'express';
-import { LocalStorageService } from '../storage/local-storage.service';
+import { TicketStorageService } from '../storage/ticket-storage.service';
 import { TicketImageTb } from './entities/ticket-image.entity';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -16,7 +16,7 @@ import { TicketImagesRepository } from './ticket-images.repository';
 export class TicketImageController {
   constructor(
     private readonly images: TicketImagesRepository,
-    private readonly storage: LocalStorageService,
+    private readonly storage: TicketStorageService,
   ) {}
 
   @Get(':id')
@@ -28,6 +28,7 @@ export class TicketImageController {
     response.setHeader('Content-Disposition', 'inline');
     response.setHeader('X-Content-Type-Options', 'nosniff');
     response.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
-    response.sendFile(this.storage.getAbsolutePath(image.file_name));
+    const buffer = await this.storage.getImage(image.file_name);
+    response.send(buffer);
   }
 }

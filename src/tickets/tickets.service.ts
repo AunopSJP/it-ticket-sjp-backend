@@ -5,6 +5,7 @@ import { TicketHistoryTb } from './entities/ticket-history.entity';
 import { TicketCommentTb } from './entities/ticket-comment.entity';
 import { TicketStatus } from '../common/enums/ticket-status.enum';
 import { TicketPriority } from '../common/enums/ticket-priority.enum';
+import { Role } from '../common/enums/role.enum';
 import { CreateTicketDto } from './dto/create-ticket.dto';
 import { AdminCreateTicketDto } from './dto/admin-create-ticket.dto';
 import { ForwardTicketDto } from './dto/forward-ticket.dto';
@@ -25,6 +26,7 @@ import { LineVerifyService } from '../line/line-verify.service';
 import { TicketsRepository, AdminTicketFilter, AdminTicketSort } from './tickets.repository';
 import { assertTicketManageableByAdmin, assertTicketReadableByAdmin } from './ticket-access.policy';
 import { errorProperty, errorStack } from '../common/error-utils';
+import { TICKET_DEPARTMENT_CODES } from '../common/constants/ticket.constants';
 
 // re-export เพื่อไม่ให้ import path เดิมใน controller/ที่อื่นพัง (AdminTicketFilter/AdminTicketSort
 // ย้ายไปอยู่ tickets.repository.ts แล้ว เพราะเป็นเรื่อง "query ตั๋วได้ยังไงบ้าง" ซึ่งเป็นหน้าที่ของ data layer)
@@ -112,7 +114,7 @@ export class TicketsService {
     const MAX_TICKET_NO_RETRIES = 3;
     let saved: TicketTb | undefined;
     for (let retry = 0; retry < MAX_TICKET_NO_RETRIES; retry++) {
-      const ticket_no = await this.generateTicketNo();
+      const ticket_no = await this.generateTicketNo(department.department_code, created_at);
       try {
         saved = await this.dataSource.transaction(async (manager) => {
           const ticket = this.ticketsRepo.createTicket(
@@ -232,7 +234,7 @@ export class TicketsService {
     const MAX_TICKET_NO_RETRIES = 3;
     let saved: TicketTb | undefined;
     for (let retry = 0; retry < MAX_TICKET_NO_RETRIES; retry++) {
-      const ticket_no = await this.generateTicketNo();
+      const ticket_no = await this.generateTicketNo(department.department_code, created_at);
       try {
         saved = await this.dataSource.transaction(async (manager) => {
           const ticket = this.ticketsRepo.createTicket(
@@ -431,6 +433,9 @@ export class TicketsService {
   async assign(ticket_id: string, admin: AdminTb, targetUserId?: number, images?: Express.Multer.File[]): Promise<TicketTb> {
     const assignee = targetUserId ? await this.adminsService.findById(targetUserId) : admin;
     if (!assignee.is_active) throw new BadRequestException('บัญชีผู้รับผิดชอบถูกปิดใช้งานแล้ว');
+    if (admin.role === Role.HEAD_ADMIN && assignee.role !== Role.ADMIN) {
+      throw new ForbiddenException('head admin มอบหมายได้เฉพาะแอดมินในแผนกตนเอง');
+    }
     if (admin.department_id !== null && assignee.department_id !== admin.department_id) {
       throw new ForbiddenException('แอดมินแผนกมอบหมายได้เฉพาะเจ้าหน้าที่ในแผนกตนเอง');
     }
@@ -788,10 +793,16 @@ export class TicketsService {
     }
   }
 
-  /** สร้างเลขที่ตั๋วรูปแบบ TK-2026-0001 แบบเรียงตามลำดับในแต่ละปี พร้อม retry กันเลขชนกรณี concurrent */
-  private async generateTicketNo(): Promise<string> {
-    const year = new Date().getFullYear();
-    const prefix = `TK-${year}-`;
+  /**
+   * สร้างเลขที่ตั๋วตามแผนกต้นทางและเดือนที่สร้าง เช่น TK-IT-2026-08-0001
+   * ใช้แผนกต้นทางเป็นส่วนหนึ่งของเลขถาวร จึงไม่เปลี่ยนเมื่อมีการส่งตั๋วต่อไปแผนกอื่น
+   */
+  private async generateTicketNo(department_code: string, created_at: Date): Promise<string> {
+    const normalizedDepartmentCode = department_code.trim().toLowerCase();
+    const departmentCode = TICKET_DEPARTMENT_CODES[normalizedDepartmentCode] ?? 'OTHER';
+    const year = created_at.getFullYear();
+    const month = String(created_at.getMonth() + 1).padStart(2, '0');
+    const prefix = `TK-${departmentCode}-${year}-${month}-`;
 
     for (let attempt = 0; attempt < 5; attempt++) {
       const count = await this.ticketsRepo.countByTicketNoPrefix(prefix);
@@ -813,8 +824,6 @@ export class TicketsService {
     for (const ticket of tickets) {
       try {
         if (ticket.status === TicketStatus.PENDING_CONFIRMATION) continue; // มีตัวจับเวลาแยกของตัวเอง
-        if (!ticket.resolve_by) continue;
-
         // เวลาที่หยุดนับสะสมจาก Wait ที่จบไปแล้ว + ช่วง Wait ปัจจุบัน (ถ้ากำลังอยู่)
         const ongoingPauseMs =
           ticket.status === TicketStatus.WAITING && ticket.wait_started_at
@@ -822,6 +831,47 @@ export class TicketsService {
             : 0;
         const pausedMs = (ticket.sla_paused_ms ?? 0) + ongoingPauseMs;
         const effectiveNow = new Date(now - pausedMs);
+
+        // เตือนงานที่ยังไม่มีผู้รับผิดชอบเพียงครั้งเดียวเมื่อเลยกำหนดมอบหมาย
+        if (
+          !ticket.assignee_id &&
+          ticket.assign_by &&
+          new Date(now) >= ticket.assign_by &&
+          !ticket.assign_breach_notified_at
+        ) {
+          ticket.assign_breach_notified_at = new Date(now);
+          await this.ticketsRepo.saveTicket(ticket);
+          await this.notificationsService.notifyAllAdmins(
+            ticket.ticket_id,
+            `⚠️ ตั๋ว ${ticket.ticket_no} ยังไม่มีผู้รับผิดชอบและเลยกำหนดมอบหมายงานแล้ว`,
+            ticket.department_id,
+          );
+        }
+
+        // deadline_date ถือว่าสิ้นสุดเวลา 23:59:59.999 ของวันที่ผู้แจ้งเลือก
+        if (ticket.deadline_date) {
+          const deadlineAt = new Date(`${ticket.deadline_date}T23:59:59.999`);
+          const warningAt = new Date(`${ticket.deadline_date}T00:00:00`);
+          if (new Date(now) >= deadlineAt && !ticket.deadline_breach_notified_at) {
+            ticket.deadline_breach_notified_at = new Date(now);
+            await this.ticketsRepo.saveTicket(ticket);
+            await this.notificationsService.notifyAllAdmins(
+              ticket.ticket_id,
+              `🚨 ตั๋ว ${ticket.ticket_no} เลยกำหนดวันที่ผู้แจ้งระบุแล้ว (${ticket.deadline_date})`,
+              ticket.department_id,
+            );
+          } else if (new Date(now) >= warningAt && new Date(now) < deadlineAt && !ticket.deadline_warning_notified_at) {
+            ticket.deadline_warning_notified_at = new Date(now);
+            await this.ticketsRepo.saveTicket(ticket);
+            await this.notificationsService.notifyAllAdmins(
+              ticket.ticket_id,
+              `⏰ ตั๋ว ${ticket.ticket_no} อยู่ในวันที่ครบกำหนดตามที่ผู้แจ้งระบุ (${ticket.deadline_date})`,
+              ticket.department_id,
+            );
+          }
+        }
+
+        if (!ticket.resolve_by) continue;
 
         const resolveWindowMs = ticket.resolve_by.getTime() - ticket.created_at.getTime();
         const warningAt = new Date(ticket.created_at.getTime() + resolveWindowMs * SLA_WARNING_THRESHOLD);
@@ -838,20 +888,9 @@ export class TicketsService {
         } else if (effectiveNow >= warningAt && !ticket.sla_warning_notified_at && !ticket.sla_breached) {
           ticket.sla_warning_notified_at = new Date();
           await this.ticketsRepo.saveTicket(ticket);
-          if (ticket.assignee_id) {
-            await this.notificationsService.notifyAllAdmins(
-              ticket.ticket_id,
-              `⏰ ตั๋ว ${ticket.ticket_no} ใกล้ครบกำหนด SLA แล้ว ("${ticket.subject}")`,
-              ticket.department_id,
-            );
-          }
-        }
-
-        // ยังไม่มีคนรับและเกินกำหนดมอบหมายแล้ว - เตือนซ้ำทุกรอบที่ background job รัน (จงใจไม่กันซ้ำ)
-        if (!ticket.assignee_id && ticket.assign_by && new Date(now) >= ticket.assign_by) {
           await this.notificationsService.notifyAllAdmins(
             ticket.ticket_id,
-            `⚠️ ตั๋ว ${ticket.ticket_no} ยังไม่มีใครรับเคส เกินกำหนดเวลามอบหมายงานแล้ว`,
+            `⏰ ตั๋ว ${ticket.ticket_no} ใกล้ครบกำหนด SLA แล้ว ("${ticket.subject}")`,
             ticket.department_id,
           );
         }

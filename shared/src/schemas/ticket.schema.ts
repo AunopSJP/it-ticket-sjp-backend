@@ -34,7 +34,7 @@ export const departmentListSchema = z.array(departmentSchema);
 
 // ==================== User (บัญชีแอดมิน) ====================
 
-export const ROLE_VALUES = ['admin', 'super_admin'] as const;
+export const ROLE_VALUES = ['admin', 'head_admin', 'super_admin'] as const;
 export const roleSchema = z.enum(ROLE_VALUES);
 export type Role = z.infer<typeof roleSchema>;
 
@@ -58,6 +58,7 @@ export const createAdminSchema = z.object({
   email: z.string().trim().email('อีเมลไม่ถูกต้อง'),
   password: z.string().min(6, 'รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร'),
   department_id: z.number().int().optional(),
+  role: roleSchema.default('admin'),
 });
 export type CreateAdminInput = z.infer<typeof createAdminSchema>;
 
@@ -229,6 +230,9 @@ export const ticketSchema = z.object({
   assign_by: dateOrIsoString.nullable(),
   resolve_by: dateOrIsoString.nullable(),
   sla_breached: z.boolean(),
+  assign_breach_notified_at: dateOrIsoString.nullable(),
+  deadline_warning_notified_at: dateOrIsoString.nullable(),
+  deadline_breach_notified_at: dateOrIsoString.nullable(),
   resolved_at: dateOrIsoString.nullable(),
   confirmation_deadline: dateOrIsoString.nullable(),
   images: z.array(ticketImageSchema),

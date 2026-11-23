@@ -16,7 +16,10 @@ import { UPLOADS_ROUTE_PREFIX } from './storage/storage.shared';
 import { ApiExceptionFilter } from './common/filters/api-exception.filter';
 
 interface HealthResponse {
-  json(body: { status: 'ok' | 'degraded'; database: 'ok' | 'unavailable' }): void;
+  json(body: {
+    status: 'ok' | 'degraded';
+    database: 'ok' | 'unavailable';
+  }): void;
   status(code: number): HealthResponse;
 }
 
@@ -123,14 +126,16 @@ async function bootstrap() {
   // จงใจไม่ query DB - แยกปัญหา "process ตาย" ออกจาก "DB ต่อไม่ติด" ไม่งั้น DB ล่มจะทำให้
   // container ถูก mark unhealthy แล้ว restart วนทั้งที่ process ยังดีอยู่
   const dataSource = app.get(DataSource);
-  app.getHttpAdapter().get('/api/health', async (_req: unknown, res: HealthResponse) => {
-    try {
-      await dataSource.query('SELECT 1');
-      res.json({ status: 'ok', database: 'ok' });
-    } catch {
-      res.status(503).json({ status: 'degraded', database: 'unavailable' });
-    }
-  });
+  app
+    .getHttpAdapter()
+    .get('/api/health', async (_req: unknown, res: HealthResponse) => {
+      try {
+        await dataSource.query('SELECT 1');
+        res.json({ status: 'ok', database: 'ok' });
+      } catch {
+        res.status(503).json({ status: 'degraded', database: 'unavailable' });
+      }
+    });
 
   app.useGlobalPipes(
     new ValidationPipe({

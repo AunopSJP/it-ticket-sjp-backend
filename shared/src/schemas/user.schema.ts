@@ -7,7 +7,7 @@ import { z } from 'zod';
  * และ adminUserSchema แบบย่อใน ticket.schema.ts - รวม SSOT มาไว้ที่เดียวที่นี่
  */
 
-export const ROLE_VALUES = ['admin', 'super_admin'] as const;
+export const ROLE_VALUES = ['admin', 'head_admin', 'super_admin'] as const;
 export const roleSchema = z.enum(ROLE_VALUES);
 export type Role = z.infer<typeof roleSchema>;
 
@@ -18,7 +18,7 @@ export const adminAccountSchema = z.object({
   email: z.string().email(),
   role: roleSchema,
   is_active: z.boolean(),
-  /** null = super admin (เห็น/จัดการตั๋วได้ทุกแผนก), ไม่ null = แอดมินแผนกนั้น */
+  /** super admin ต้องไม่มี department_id; head/admin ต้องผูกกับแผนก */
   department_id: z.number().int().nullable(),
   created_at: z.union([z.date(), z.string()]),
   updated_at: z.union([z.date(), z.string()]).optional(),
@@ -33,6 +33,7 @@ export const createAdminSchema = z.object({
   email: z.string().trim().email('อีเมลไม่ถูกต้อง'),
   password: z.string().min(6, 'รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร'),
   department_id: z.number().int().optional(),
+  role: roleSchema.default('admin'),
 });
 export type CreateAdminInput = z.infer<typeof createAdminSchema>;
 

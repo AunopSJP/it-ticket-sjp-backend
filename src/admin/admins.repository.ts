@@ -4,6 +4,7 @@ import { Not, Repository } from 'typeorm';
 import { AdminTb } from './admin.entity';
 import { TicketTb } from '../tickets/entities/ticket.entity';
 import { TicketStatus } from '../common/enums/ticket-status.enum';
+import { Role } from '../common/enums/role.enum';
 
 /**
  * Separate Data Layer: รวม TypeORM access ของ user (บัญชีแอดมิน) ไว้ที่นี่ที่เดียว
@@ -61,5 +62,9 @@ export class AdminsRepository {
   /** จำนวนตั๋วที่ยังไม่ปิดที่แอดมินคนนี้ถืออยู่ ณ ตอนนี้ - ใช้เตือนตอนจะปิดใช้งานบัญชี */
   async countActiveAssignedTickets(admin_id: number): Promise<number> {
     return this.ticketsRepo.count({ where: { assignee_id: admin_id, status: Not(TicketStatus.CLOSED) } });
+  }
+
+  countHeadAdminsByDepartment(department_id: number): Promise<number> {
+    return this.adminsRepo.count({ where: { department_id, role: Role.HEAD_ADMIN } });
   }
 }
