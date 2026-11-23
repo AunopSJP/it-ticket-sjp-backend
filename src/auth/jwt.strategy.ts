@@ -6,7 +6,7 @@ import { AdminsService } from '../admin/admins.service';
 
 export interface JwtPayload {
   sub: number;
-  email: string;
+  phone?: string | null;
   iat?: number;
 }
 

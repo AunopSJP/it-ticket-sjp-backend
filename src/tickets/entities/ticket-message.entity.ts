@@ -60,10 +60,24 @@ export class TicketMessageTb {
   @Column({ name: 'ticket_message_is_read', default: false })
   is_read: boolean;
 
+  /** กันกดส่งซ้ำ: unique ต่อ (ticket_id, key) - ข้อความเดิมที่ส่งด้วยคีย์เดิมจะถูกคืนแทนการสร้างใหม่ */
+  @Column({ name: 'ticket_message_idempotency_key', type: 'varchar', nullable: true })
+  idempotency_key: string | null;
+
   @CreateDateColumn({ name: 'ticket_message_created_at' })
   created_at: Date;
 
   /** Response-only display fields populated when chat history joins sender relations. */
   sender_admin_name?: string;
   sender_user_name?: string;
+  attachments?: TicketMessageAttachment[];
+}
+
+/** response-only: ไฟล์แนบที่ส่งมากับข้อความ (ไม่ใช่คอลัมน์ของตาราง) */
+export interface TicketMessageAttachment {
+  ticket_attachment_id: number;
+  original_name: string;
+  file_path: string;
+  /** URL ที่ต้องแนบ token เพื่อดาวน์โหลด - controller เป็นผู้ตรวจสิทธิ์ ไม่ใช่ static path */
+  download_url: string;
 }

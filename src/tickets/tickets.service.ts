@@ -1,5 +1,6 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+﻿import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
+import { DEFAULT_TICKET_TRIAGE_PRIORITY, TicketTriagePriority, primaryStatusOf } from '@it-ticket/shared';
 import { TicketTb } from './entities/ticket.entity';
 import { TicketHistoryTb } from './entities/ticket-history.entity';
 import { TicketCommentTb } from './entities/ticket-comment.entity';
@@ -21,6 +22,7 @@ import { UsersService } from '../users/users.service';
 import { UserNotificationsService } from '../users/user-notifications.service';
 import { TicketStorageService } from '../storage/ticket-storage.service';
 import { computeSlaDeadlines, RESOLUTION_CONFIRM_TIMEOUT_HOURS, SLA_WARNING_THRESHOLD } from './sla.util';
+import { addPolicyHours, FirstResponseClock, firstResponseClock, policyFor, ResolveClock, resolveClock } from './first-response-sla.util';
 import { AuditLogService } from '../audit/audit-log.service';
 import { LineVerifyService } from '../line/line-verify.service';
 import { TicketsRepository, AdminTicketFilter, AdminTicketSort } from './tickets.repository';
@@ -67,9 +69,8 @@ export class TicketsService {
 
   async create(dto: CreateTicketDto, files: Express.Multer.File[]): Promise<CreateTicketResult> {
     // verify identity ก่อนอ่าน idempotency record เสมอ ไม่เช่นนั้นคนที่รู้ key อาจขอตั๋วเดิมพร้อม PII ได้
-    const user = await this.usersService.findOrCreateFromLineProfile(
-      ...(await this.verifyLineProfile(dto.line_id_token)),
-    );
+    const [line_user_id, line_display_name, line_picture] = await this.verifyLineProfile(dto.line_id_token);
+    const user = await this.usersService.findOrCreateFromLineProfile(line_user_id, line_display_name, line_picture);
 
     // 1) Idempotency key: กันกดส่งซ้ำ/network retry สร้างตั๋วซ้อนกัน - ถ้าเคยส่งคีย์นี้มาแล้วคืนตั๋วเดิมไปเลย
     if (dto.idempotency_key) {
@@ -79,35 +80,36 @@ export class TicketsService {
           throw new ForbiddenException('รหัสป้องกันการส่งซ้ำนี้ไม่ได้เป็นของผู้แจ้งปัจจุบัน');
         }
         const full = await this.findByIdInternal(existingByKey.ticket_id);
-        return { ...full, is_duplicate: true };
+        return { ...this.withFirstResponse(full), is_duplicate: true };
       }
     }
 
     // ตรวจแผนกปลายทางมีอยู่จริงก่อน จะได้ error message ที่อ่านรู้เรื่องกว่าปล่อยให้ FK constraint ล้ม
-    const department = await this.departmentsService.findById(dto.department_id);
+    // ผู้แจ้งไม่ต้องเลือกแผนก - ค่าเริ่มต้นคือ "ไม่แน่ใจ" (แผนก other) ให้เจ้าหน้าที่คัดแยกทีหลัง
+    const department = dto.department_id
+      ? await this.departmentsService.findById(dto.department_id)
+      : await this.departmentsService.findFallback();
 
-    // แผนก "อื่นๆ" (department_code = 'other') ไม่สร้างแผนกใหม่ถาวรในระบบอีกต่อไป
-    // แต่บังคับให้พิมพ์ชื่อแผนกที่ต้องการเองแทน เก็บเป็นข้อความอิสระผูกกับตั๋วใบนี้ใบเดียว
+    // แผนก "อื่นๆ" (department_code = 'other') เก็บชื่อที่พิมพ์เองเป็นข้อความอิสระผูกกับตั๋วใบนี้
+    // ไม่บังคับแล้ว เพราะค่าเริ่มต้นของฟอร์มคือ "ไม่แน่ใจ"
     const custom_department_note =
       department.department_code === 'other' ? dto.custom_department_note?.trim() : undefined;
-    if (department.department_code === 'other' && !custom_department_note) {
-      throw new BadRequestException('กรุณาระบุชื่อแผนกที่ต้องการ');
-    }
 
     // 2) เช็คตั๋วซ้ำ: ผู้แจ้งคนเดิม + แผนก + หัวข้อปัญหาเดียวกัน ที่ยังไม่ปิดงาน - พาไปตั๋วเดิมแทนสร้างใหม่
     // (ข้ามการเช็คนี้ไปเลยถ้าไม่มี user identity ที่เชื่อถือได้ - กรณี fallback ไม่มี LINE)
     const dup = await this.ticketsRepo.findDuplicateByUser(
       user.user_id,
-      dto.department_id,
+      department.department_id,
       dto.subject.trim(),
     );
     if (dup) {
       const full = await this.findByIdInternal(dup.ticket_id);
-      return { ...full, is_duplicate: true };
+      return { ...this.withFirstResponse(full), is_duplicate: true };
     }
 
     const created_at = new Date();
-    const { assign_by, resolve_by } = computeSlaDeadlines(dto.priority, created_at);
+    // ผู้แจ้งไม่ตั้ง Priority - ใช้ระดับปกติเป็นค่าตั้งต้นของ SLA จนกว่าเจ้าหน้าที่จะคัดแยกด้วย P1-P4
+    const { assign_by, resolve_by } = computeSlaDeadlines(TicketPriority.NORMAL, created_at);
 
     // สร้างตั๋ว + history แถวแรกในทรานแซคชันเดียวกัน พร้อม retry ถ้าเลขที่ตั๋วชนกัน (ticket_no มี unique
     // constraint ที่ DB กันซ้ำอยู่แล้ว แต่ retry ให้อัตโนมัติแทนที่จะโยน 500 ตรงๆ เวลาชนกันพอดี)
@@ -120,20 +122,24 @@ export class TicketsService {
           const ticket = this.ticketsRepo.createTicket(
             {
               ticket_no,
-              full_name: dto.full_name,
-              contact: dto.contact,
+              full_name: dto.full_name?.trim() || line_display_name?.trim() || 'ผู้แจ้ง',
+              contact: dto.contact?.trim() ?? '',
               location: dto.location ?? null,
-              department_id: dto.department_id,
-              priority: dto.priority,
-              urgent_detail: dto.urgent_detail ?? null,
-              impact_level: dto.impact_level ?? null,
-              deadline_note: dto.deadline_note ?? null,
-              deadline_date: dto.deadline_date ?? null,
-              urgent_phone: dto.urgent_phone ?? null,
+              department_id: department.department_id,
+              priority: TicketPriority.NORMAL,
+              triage_priority: DEFAULT_TICKET_TRIAGE_PRIORITY,
+              first_response_due_at: this.computePolicyDue(DEFAULT_TICKET_TRIAGE_PRIORITY, created_at).first,
+              first_responded_at: null,
+              resolve_due_at: this.computePolicyDue(DEFAULT_TICKET_TRIAGE_PRIORITY, created_at).resolve,
+              urgent_detail: null,
+              impact_level: null,
+              deadline_note: null,
+              deadline_date: null,
+              urgent_phone: null,
               selected_symptoms: dto.selected_symptoms ?? [],
               user_id: user?.user_id ?? null,
               subject: dto.subject,
-              description: dto.description ?? null,
+              description: dto.description,
               custom_department_note: custom_department_note ?? null,
               status: TicketStatus.OPEN,
               assign_by,
@@ -150,7 +156,7 @@ export class TicketsService {
                 ticket_id: savedTicket.ticket_id,
                 from_status: TicketStatus.OPEN,
                 to_status: TicketStatus.OPEN,
-                to_department_id: dto.department_id,
+                to_department_id: department.department_id,
                 note: 'สร้างตั๋วงานใหม่เข้าสู่ระบบ',
               },
               manager,
@@ -175,7 +181,7 @@ export class TicketsService {
       throw new BadRequestException('สร้างตั๋วงานไม่สำเร็จ (เลขที่ตั๋วชนกันซ้ำหลายครั้ง) กรุณาลองใหม่อีกครั้ง');
     }
 
-    await this.symptomsService.recordOccurrences(dto.department_id, [
+    await this.symptomsService.recordOccurrences(department.department_id, [
       ...(dto.selected_symptoms ?? []),
       dto.subject,
     ]);
@@ -183,7 +189,7 @@ export class TicketsService {
     await this.notificationsService.notifyAllAdmins(
       saved.ticket_id,
       `🆕 ตั๋วใหม่ ${saved.ticket_no}: ${dto.subject}`,
-      dto.department_id,
+      department.department_id,
     );
 
     // 3) แนบรูป/ไฟล์ประกอบ (ไม่บังคับ) - เขียนลง local disk เสมอ
@@ -206,7 +212,7 @@ export class TicketsService {
       }
     }
 
-    const created = await this.findByIdInternal(saved.ticket_id);
+    const created = this.withFirstResponse(await this.findByIdInternal(saved.ticket_id));
     this.emitTicketChanged(created);
     return created;
   }
@@ -245,6 +251,10 @@ export class TicketsService {
               location: dto.location ?? null,
               department_id: dto.department_id,
               priority: dto.priority,
+              triage_priority: DEFAULT_TICKET_TRIAGE_PRIORITY,
+              first_response_due_at: this.computePolicyDue(DEFAULT_TICKET_TRIAGE_PRIORITY, created_at).first,
+              first_responded_at: null,
+              resolve_due_at: this.computePolicyDue(DEFAULT_TICKET_TRIAGE_PRIORITY, created_at).resolve,
               urgent_detail: dto.urgent_detail ?? null,
               impact_level: dto.impact_level ?? null,
               deadline_note: dto.deadline_note ?? null,
@@ -326,7 +336,7 @@ export class TicketsService {
       }
     }
 
-    const created = await this.findByIdInternal(saved.ticket_id);
+    const created = this.withFirstResponse(await this.findByIdInternal(saved.ticket_id));
     this.emitTicketChanged(created);
     return created;
   }
@@ -334,13 +344,73 @@ export class TicketsService {
   /** รายการตั๋วสำหรับหน้า Dashboard แอดมิน - แอดมินแผนก (department_id ไม่ null) ถูก force filter
    *  ให้เห็นเฉพาะตั๋วแผนกตัวเองเสมอ ไม่สนใจ filter.department_id ที่ client ส่งมา */
   findAllForAdmin(admin: AdminTb, filter: AdminTicketFilter = {}, page = 1, page_size = 30) {
-    return this.ticketsRepo.findAllForAdmin(admin.department_id, filter, page, page_size);
+    return this.ticketsRepo.findAllForAdmin(admin.department_id, filter, page, page_size)
+      .then((result) => ({ ...result, items: result.items.map((ticket) => this.withFirstResponse(ticket)) }));
   }
 
   async findByIdForAdmin(ticket_id: string, admin: AdminTb): Promise<TicketTb> {
     const ticket = await this.findByIdInternal(ticket_id);
     assertTicketReadableByAdmin(ticket, admin);
+    return this.withFirstResponse(ticket);
+  }
+
+  /** คำนวณสถานะ SLA ตอบครั้งแรกฝั่งเซิร์ฟเวอร์ (UI ไม่คำนวณเอง) */
+  withFirstResponse(ticket: TicketTb): TicketTb {
+    const waitingSince = ticket.status === TicketStatus.WAITING ? (ticket.wait_started_at ?? null) : null;    const firstClock = firstResponseClock({
+      created_at: ticket.created_at,
+      triage_priority: ticket.triage_priority,
+      responded_at: ticket.first_responded_at ?? null,
+    });
+    const resolveTarget = resolveClock({
+      created_at: ticket.created_at,
+      triage_priority: ticket.triage_priority,
+      resolved_at: ticket.resolved_at ?? null,
+      paused_ms: ticket.sla_paused_ms ?? 0,
+      waiting_since: waitingSince,
+    });
+    (ticket as TicketTb & { first_response?: FirstResponseClock }).first_response = firstClock;
+    (ticket as TicketTb & { resolve?: ResolveClock }).resolve = resolveTarget;
+    (ticket as TicketTb & { primary_status?: string }).primary_status = primaryStatusOf(ticket.status);
+    ticket.first_response_due_at = firstClock.due_at ?? ticket.first_response_due_at ?? null;
+    ticket.resolve_due_at = resolveTarget.due_at ?? ticket.resolve_due_at ?? null;
     return ticket;
+  }
+
+  /** เป้าหมายตอบครั้งแรก/แก้ไขตอนสร้าง - คำนวณจากนโยบายของ triage priority */
+  private computePolicyDue(priority: TicketTb['triage_priority'], created_at: Date): { first: Date | null; resolve: Date | null } {
+    const policy = policyFor(priority);
+    if (!policy) return { first: null, resolve: null };
+    return {
+      first: addPolicyHours(created_at, policy.firstResponseHours, policy.calendar),
+      resolve: addPolicyHours(created_at, policy.resolveHours, policy.calendar),
+    };
+  }
+
+  async changeTriagePriority(ticket_id: string, priority: TicketTriagePriority, admin: AdminTb): Promise<TicketTb> {
+    const result = await this.dataSource.transaction(async (manager) => {
+      if (await this.ticketsRepo.lockStatus(manager, ticket_id) === null) {
+        throw new NotFoundException('ไม่พบตั๋วงานนี้');
+      }
+      const ticket = await this.ticketsRepo.findById(ticket_id, manager);
+      if (!ticket) throw new NotFoundException('ไม่พบตั๋วงานนี้');
+      assertTicketManageableByAdmin(ticket, admin);
+      const previous = ticket.triage_priority;
+      if (previous !== priority) {
+        const due = this.computePolicyDue(priority, ticket.created_at);
+        const fields: Partial<TicketTb> = { triage_priority: priority };
+        // เป้าหมายที่ยังไม่ปิดจึงเปลี่ยนตามนโยบายของ Priority ใหม่
+        if (!ticket.first_responded_at) fields.first_response_due_at = due.first;
+        if (!ticket.resolved_at) fields.resolve_due_at = due.resolve;
+        await this.ticketsRepo.updateFields(ticket_id, fields, manager);
+      }
+      return { previous, ticket: await this.findByIdInternal(ticket_id, manager) };
+    });
+    if (result.previous !== priority) {
+      await this.recordTicketAudit(admin, 'ticket.priority', result.ticket,
+        `เปลี่ยน Priority ${result.previous.toUpperCase()} → ${priority.toUpperCase()} ในตั๋ว ${result.ticket.ticket_no}`);
+      this.emitTicketChanged(result.ticket);
+    }
+    return this.withFirstResponse(result.ticket);
   }
 
   /** เวอร์ชันภายในที่ไม่เช็คสิทธิ์แผนก - รับ manager เสริมได้เผื่อเรียกจากภายใน transaction เดียวกัน
@@ -468,6 +538,8 @@ export class TicketsService {
         const now = new Date();
         ticket.resolution_note = dto.resolution_note;
         ticket.resolved_at = now;
+        // เป้าหมายแก้ไขบรรลุแล้ว - เคลียร์ due เพื่อให้คิวเหลือเฉพาะเป้าหมายที่ยังเปิด (UI คำนวณ due จากนโยบายเอง)
+        ticket.resolve_due_at = null;
         ticket.confirmation_deadline = new Date(
           now.getTime() + RESOLUTION_CONFIRM_TIMEOUT_HOURS * 60 * 60 * 1000,
         );
@@ -531,15 +603,93 @@ export class TicketsService {
       return this.findByIdInternal(ticket_id, manager);
     });
 
-    this.emitTicketChanged(closedTicket);
+    const closed = this.withFirstResponse(closedTicket);
+    this.emitTicketChanged(closed);
     await this.auditLogService.record({
       action: 'ticket.confirm_resolution',
       entity_type: 'ticket',
-      entity_id: closedTicket.ticket_id,
-      summary: `ผู้แจ้งยืนยันปิดเคส ${closedTicket.ticket_no}`,
-      metadata: { ticket_no: closedTicket.ticket_no, user_id: user.user_id },
+      entity_id: closed.ticket_id,
+      summary: `ผู้แจ้งยืนยันปิดเคส ${closed.ticket_no}`,
+      metadata: { ticket_no: closed.ticket_no, user_id: user.user_id },
     });
-    return closedTicket;
+    return closed;
+  }
+
+  /**
+   * เปิดเคสที่ "แก้ไขแล้ว" (รอยืนยัน) กลับไป "กำลังดำเนินการ" ตามสเปก 2.2
+   * - เวลาที่ตั๋วอยู่รอยืนยันถูกพัก (บวกเข้า sla_paused_ms) เพื่อไม่ให้นับเป็นเวลาทำงานของเป้าหมายแก้ไข
+   * - first_responded_at ไม่ถูกล้าง: เปิดใหม่ไม่เริ่มรอบตอบครั้งแรกใหม่
+   */
+  async reopen(ticket_id: string, admin: AdminTb): Promise<TicketTb> {
+    const result = await this.dataSource.transaction(async (manager) => {
+      const lockedStatus = await this.ticketsRepo.lockStatus(manager, ticket_id);
+      if (lockedStatus === null) throw new NotFoundException('ไม่พบตั๋วงานนี้');
+      if (lockedStatus !== TicketStatus.PENDING_CONFIRMATION) {
+        throw new BadRequestException('เปิดเคสใหม่ได้เฉพาะตั๋วที่รอผู้แจ้งยืนยันเท่านั้น');
+      }
+      const ticket = await this.ticketsRepo.findById(ticket_id, manager);
+      if (!ticket) throw new NotFoundException('ไม่พบตั๋วงานนี้');
+      assertTicketManageableByAdmin(ticket, admin);
+
+      const confirmedAt = ticket.resolved_at ?? new Date();
+      const pausedMs = (ticket.sla_paused_ms ?? 0) + Math.max(0, Date.now() - confirmedAt.getTime());
+      const due = this.computePolicyDue(ticket.triage_priority, ticket.created_at).resolve;
+      await this.ticketsRepo.updateFields(ticket_id, {
+        status: TicketStatus.IN_PROGRESS,
+        resolved_at: null,
+        confirmation_deadline: null,
+        sla_paused_ms: pausedMs,
+        // เปิดเป้าหมายแก้ไขอีกครั้ง: due กลับมาและเลื่อนตามเวลาที่ถูกพัก
+        resolve_due_at: due ? new Date(due.getTime() + pausedMs) : null,
+      }, manager);
+      await this.ticketsRepo.saveHistory(
+        this.ticketsRepo.createHistory({
+          ticket_id,
+          from_status: TicketStatus.PENDING_CONFIRMATION,
+          to_status: TicketStatus.IN_PROGRESS,
+          changed_by_id: admin.admin_id,
+          note: 'เปิดเคสใหม่หลังผู้แจ้งแจ้งว่าแก้ไขไม่ครบ',
+        }, manager),
+        manager,
+      );
+      return this.findByIdInternal(ticket_id, manager);
+    });
+    await this.recordTicketAudit(admin, 'ticket.reopen', result, `${admin.full_name} เปิดเคส ${result.ticket_no} ใหม่`);
+    this.emitTicketChanged(result);
+    return this.withFirstResponse(result);
+  }
+
+  /**
+   * ผู้แจ้งตอบกลับในสถานะ "รอข้อมูลผู้แจ้ง" = กลับมาดำเนินการอัตโนมัติ (สเปก 2.2)
+   * เรียกจากแชทฝั่งผู้แจ้ง ไม่ใช่แอดมิน จึงไม่ผ่าน transition() (ที่บังคับสิทธิ์แอดมิน)
+   */
+  async resumeFromWaiting(ticket_id: string): Promise<TicketTb | null> {
+    const resumed = await this.dataSource.transaction(async (manager) => {
+      const lockedStatus = await this.ticketsRepo.lockStatus(manager, ticket_id);
+      if (lockedStatus === null) throw new NotFoundException('ไม่พบตั๋วงานนี้');
+      if (lockedStatus !== TicketStatus.WAITING) return null;
+      const ticket = await this.ticketsRepo.findById(ticket_id, manager);
+      if (!ticket) return null;
+
+      const pausedMs = (ticket.sla_paused_ms ?? 0) +
+        (ticket.wait_started_at ? Math.max(0, Date.now() - ticket.wait_started_at.getTime()) : 0);
+      await this.ticketsRepo.updateFields(ticket_id, {
+        status: TicketStatus.IN_PROGRESS,
+        wait_started_at: null,
+        sla_paused_ms: pausedMs,
+      }, manager);
+      await this.ticketsRepo.saveHistory(
+        this.ticketsRepo.createHistory({
+          ticket_id,
+          from_status: TicketStatus.WAITING,
+          to_status: TicketStatus.IN_PROGRESS,
+          note: 'ผู้แจ้งตอบกลับ - กลับมาดำเนินการอัตโนมัติ',
+        }, manager),
+        manager,
+      );
+      return this.findByIdInternal(ticket_id, manager);
+    });
+    return resumed ? this.withFirstResponse(resumed) : null;
   }
 
   async wait(ticket_id: string, dto: WaitTicketDto, admin: AdminTb, images?: Express.Multer.File[]): Promise<TicketTb> {
@@ -594,10 +744,27 @@ export class TicketsService {
   async listComments(ticket_id: string, admin: AdminTb): Promise<TicketCommentTb[]> {
     const ticket = await this.getTicketOrThrow(ticket_id);
     assertTicketManageableByAdmin(ticket, admin);
-    return this.ticketsRepo.listComments(ticket_id);
+    const comments = await this.ticketsRepo.listComments(ticket_id);
+    const withFiles = await this.ticketsRepo.listCommentAttachments(comments.map((c) => c.ticket_comment_id));
+    const byComment = new Map<number, { ticket_attachment_id: number; original_name: string; download_url: string }[]>();
+    for (const attachment of withFiles) {
+      if (attachment.ticket_comment_id === null) continue;
+      const list = byComment.get(attachment.ticket_comment_id) ?? [];
+      list.push({
+        ticket_attachment_id: attachment.ticket_attachment_id,
+        original_name: attachment.original_name,
+        download_url: `/tickets/chat/attachments/${attachment.ticket_attachment_id}`,
+      });
+      byComment.set(attachment.ticket_comment_id, list);
+    }
+    return comments.map((comment) => {
+      (comment as TicketCommentTb & { attachments?: unknown }).attachments =
+        byComment.get(comment.ticket_comment_id) ?? [];
+      return comment;
+    });
   }
 
-  async addComment(ticket_id: string, dto: CreateTicketCommentDto, admin: AdminTb): Promise<TicketCommentTb> {
+  async addComment(ticket_id: string, dto: CreateTicketCommentDto, admin: AdminTb, files: Express.Multer.File[] = []): Promise<TicketCommentTb> {
     const ticket = await this.getTicketOrThrow(ticket_id);
     assertTicketManageableByAdmin(ticket, admin);
     const comment = await this.ticketsRepo.saveComment(
@@ -608,6 +775,29 @@ export class TicketsService {
         is_internal: dto.is_internal ?? true,
       }),
     );
+    if (files?.length) {
+      try {
+        const uploaded = await Promise.all(files.map((file) => this.storageService.uploadTicketImage(file)));
+        const saved = await this.ticketsRepo.saveAttachments(
+          uploaded.map(({ file_name, public_url }, index) => ({
+            ticket_id,
+            ticket_message_id: null,
+            ticket_comment_id: comment.ticket_comment_id,
+            file_name,
+            original_name: files[index].originalname,
+            file_path: public_url,
+          })),
+        );
+        (comment as TicketCommentTb & { attachments?: unknown }).attachments = saved.map((attachment) => ({
+          ticket_attachment_id: attachment.ticket_attachment_id,
+          original_name: attachment.original_name,
+          download_url: `/tickets/chat/attachments/${attachment.ticket_attachment_id}`,
+        }));
+      } catch (err) {
+        this.logger.error(`บันทึกไฟล์แนบของบันทึกภายในไม่สำเร็จ (บันทึกถูกสร้างแล้ว):`, errorStack(err));
+        throw new BadRequestException('แนบไฟล์ไม่สำเร็จ กรุณาลองบันทึกใหม่');
+      }
+    }
     await this.recordTicketAudit(admin, 'ticket.comment', ticket, `${admin.full_name} เพิ่มบันทึกในเคส ${ticket.ticket_no}`);
     return comment;
   }
@@ -646,6 +836,13 @@ export class TicketsService {
     let historyId = 0;
 
     const savedTicket = await this.dataSource.transaction(async (manager) => {
+      // ล็อกแถวตั๋ว (FOR UPDATE) ก่อนอ่านข้อมูล เพื่อให้แอดมินที่กดพร้อมกันรอคิวกัน และอ่านค่าล่าสุดเสมอ
+      // ถ้าล็อกหลังอ่าน (แบบเดิม) การเปลี่ยนที่สถานะไม่เปลี่ยน เช่น มอบหมายซ้ำตอน IN_PROGRESS
+      // จะผ่านเช็คสถานะทั้งคู่แล้วคนที่เขียนทีหลังเขียนทับของอีกคนด้วยข้อมูลเก่า
+      const lockedStatus = await this.ticketsRepo.lockStatus(manager, ticket_id);
+      if (lockedStatus === null) {
+        throw new NotFoundException('ไม่พบตั๋วงานนี้');
+      }
       const ticket = await this.ticketsRepo.findById(ticket_id, manager);
       if (!ticket) {
         throw new NotFoundException('ไม่พบตั๋วงานนี้');
@@ -692,7 +889,9 @@ export class TicketsService {
       user_message = result.user_message ?? undefined;
       ticket_no = ticket.ticket_no;
 
-      return this.findByIdInternal(ticket_id, manager);
+      // แนบ first_response/resolve/primary_status ให้ response ของ action ทุกตัวเหมือน list/detail
+      // (เดิมคืน entity ดิบ ทำให้ UI ได้ primary_status ว่างหลังกดเปลี่ยนสถานะ)
+      return this.withFirstResponse(await this.findByIdInternal(ticket_id, manager));
     });
 
     // แจ้งเตือนผู้แจ้งปัญหา (ถ้ามี user ผูกกับตั๋วนี้อยู่ - บาง ticket user_id เป็น null กรณี
@@ -725,7 +924,7 @@ export class TicketsService {
         );
         const savedImages = await this.ticketsRepo.saveImages(images);
         // ต้อง fetch ใหม่อีกรอบ - savedTicket ที่ได้จาก transaction ข้างบนยังไม่มีรูปที่เพิ่งอัปโหลดเสร็จทีหลัง
-        const refreshed = await this.findByIdInternal(ticket_id);
+        const refreshed = this.withFirstResponse(await this.findByIdInternal(ticket_id));
         this.emitTicketChanged(refreshed);
         return refreshed;
       } catch (err) {
@@ -733,8 +932,9 @@ export class TicketsService {
       }
     }
 
-    this.emitTicketChanged(savedTicket);
-    return savedTicket;
+    const ticketOut = this.withFirstResponse(savedTicket);
+    this.emitTicketChanged(ticketOut);
+    return ticketOut;
   }
 
   private async getTicketOrThrow(ticket_id: string): Promise<TicketTb> {
@@ -840,7 +1040,9 @@ export class TicketsService {
           !ticket.assign_breach_notified_at
         ) {
           ticket.assign_breach_notified_at = new Date(now);
-          await this.ticketsRepo.saveTicket(ticket);
+          await this.ticketsRepo.updateFields(ticket.ticket_id, {
+            assign_breach_notified_at: ticket.assign_breach_notified_at,
+          });
           await this.notificationsService.notifyAllAdmins(
             ticket.ticket_id,
             `⚠️ ตั๋ว ${ticket.ticket_no} ยังไม่มีผู้รับผิดชอบและเลยกำหนดมอบหมายงานแล้ว`,
@@ -854,7 +1056,9 @@ export class TicketsService {
           const warningAt = new Date(`${ticket.deadline_date}T00:00:00`);
           if (new Date(now) >= deadlineAt && !ticket.deadline_breach_notified_at) {
             ticket.deadline_breach_notified_at = new Date(now);
-            await this.ticketsRepo.saveTicket(ticket);
+            await this.ticketsRepo.updateFields(ticket.ticket_id, {
+              deadline_breach_notified_at: ticket.deadline_breach_notified_at,
+            });
             await this.notificationsService.notifyAllAdmins(
               ticket.ticket_id,
               `🚨 ตั๋ว ${ticket.ticket_no} เลยกำหนดวันที่ผู้แจ้งระบุแล้ว (${ticket.deadline_date})`,
@@ -862,7 +1066,9 @@ export class TicketsService {
             );
           } else if (new Date(now) >= warningAt && new Date(now) < deadlineAt && !ticket.deadline_warning_notified_at) {
             ticket.deadline_warning_notified_at = new Date(now);
-            await this.ticketsRepo.saveTicket(ticket);
+            await this.ticketsRepo.updateFields(ticket.ticket_id, {
+              deadline_warning_notified_at: ticket.deadline_warning_notified_at,
+            });
             await this.notificationsService.notifyAllAdmins(
               ticket.ticket_id,
               `⏰ ตั๋ว ${ticket.ticket_no} อยู่ในวันที่ครบกำหนดตามที่ผู้แจ้งระบุ (${ticket.deadline_date})`,
@@ -879,7 +1085,10 @@ export class TicketsService {
         if (effectiveNow >= ticket.resolve_by && !ticket.sla_breached) {
           ticket.sla_breached = true;
           ticket.sla_breach_notified_at = new Date();
-          await this.ticketsRepo.saveTicket(ticket);
+          await this.ticketsRepo.updateFields(ticket.ticket_id, {
+            sla_breached: true,
+            sla_breach_notified_at: ticket.sla_breach_notified_at,
+          });
           await this.notificationsService.notifyAllAdmins(
             ticket.ticket_id,
             `🚩 ตั๋ว ${ticket.ticket_no} เกินกำหนด SLA แล้ว ("${ticket.subject}")`,
@@ -887,7 +1096,9 @@ export class TicketsService {
           );
         } else if (effectiveNow >= warningAt && !ticket.sla_warning_notified_at && !ticket.sla_breached) {
           ticket.sla_warning_notified_at = new Date();
-          await this.ticketsRepo.saveTicket(ticket);
+          await this.ticketsRepo.updateFields(ticket.ticket_id, {
+            sla_warning_notified_at: ticket.sla_warning_notified_at,
+          });
           await this.notificationsService.notifyAllAdmins(
             ticket.ticket_id,
             `⏰ ตั๋ว ${ticket.ticket_no} ใกล้ครบกำหนด SLA แล้ว ("${ticket.subject}")`,
@@ -914,9 +1125,12 @@ export class TicketsService {
             return null;
           }
 
-          ticket.status = TicketStatus.CLOSED;
-          ticket.closed_at = new Date();
-          await this.ticketsRepo.saveTicket(ticket, manager);
+          // อัปเดตเฉพาะ status/closed_at - ไม่ save ทั้ง entity เพราะ `ticket` เป็น snapshot เก่าจากก่อนเข้า transaction
+          await this.ticketsRepo.updateFields(
+            ticket.ticket_id,
+            { status: TicketStatus.CLOSED, closed_at: new Date() },
+            manager,
+          );
 
           await this.ticketsRepo.saveHistory(
             this.ticketsRepo.createHistory(
@@ -935,7 +1149,8 @@ export class TicketsService {
         });
 
         if (closedTicket) {
-          this.emitTicketChanged(closedTicket);
+          const closed = this.withFirstResponse(closedTicket);
+          this.emitTicketChanged(closed);
         }
       } catch (err) {
         this.logger.error(`auto-close ตั๋ว ${ticket.ticket_no} ไม่สำเร็จ (ข้ามไปทำใบถัดไปต่อ):`, errorStack(err));

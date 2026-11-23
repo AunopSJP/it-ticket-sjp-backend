@@ -23,12 +23,21 @@ export class AdminTb {
   @Column({ name: 'admin_full_name' })
   full_name!: string;
 
-  @Column({ name: 'admin_email', unique: true })
-  email!: string;
+  /** เบอร์โทรคือชื่อผู้ใช้ตอน login (10 หลัก) - null ได้เฉพาะบัญชีเก่าก่อนเปลี่ยนระบบ */
+  @Column({ name: 'admin_phone', type: 'varchar', unique: true, nullable: true })
+  phone!: string | null;
+
+  /** อีเมลเป็นข้อมูลเสริม ไม่ใช้ login แล้ว */
+  @Column({ name: 'admin_email', type: 'varchar', unique: true, nullable: true })
+  email!: string | null;
 
   /** select: false ป้องกันไม่ให้ password หลุดออกมาใน query ทั่วไปโดยไม่ตั้งใจ */
   @Column({ name: 'admin_password_hash', select: false })
   password!: string;
+
+  /** true = ต้องเปลี่ยนรหัสผ่านก่อน (JwtAuthGuard บล็อกทุก endpoint ที่ไม่ได้อนุญาตไว้) */
+  @Column({ name: 'admin_must_change_password', default: false })
+  must_change_password!: boolean;
 
   @Column({ name: 'admin_role', type: 'varchar', default: Role.ADMIN })
   role!: Role;

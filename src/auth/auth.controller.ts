@@ -9,11 +9,17 @@ import { AdminTb } from '../admin/admin.entity';
 import { THROTTLE_STRICT } from '../common/constants/throttle.constants';
 import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe';
 import { loginSchema } from './dto/login.dto';
+import { AdminsService } from '../admin/admins.service';
+import { AllowPasswordChange } from '../common/decorators/allow-password-change.decorator';
+import { ChangePasswordInput, changePasswordSchema } from '@it-ticket/shared';
 
 @ApiTags('auth')
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly adminsService: AdminsService,
+  ) {}
 
 
   /** 5 ครั้ง/นาที ต่อ IP - ใช้คู่กับการล็อกบัญชีราย "อีเมล" ใน AuthService
@@ -27,10 +33,27 @@ export class AuthController {
   }
 
   @Get('me')
+  @AllowPasswordChange()
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
   me(@CurrentUser() user: AdminTb) {
     const { password: _password, ...safeUser } = user;
     return safeUser;
+  }
+
+  /**
+   * เปลี่ยนรหัสผ่านของตัวเอง - endpoint เดียว (คู่กับ /auth/me) ที่ผู้ใช้ซึ่งถูกบังคับเปลี่ยนรหัสเรียกได้
+   * คืน session ใหม่ เพราะ token เดิมถูกยกเลิกทันทีที่รหัสผ่านเปลี่ยน
+   */
+  @Post('change-password')
+  @HttpCode(HttpStatus.OK)
+  @AllowPasswordChange()
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @Throttle(THROTTLE_STRICT)
+  @UsePipes(new ZodValidationPipe(changePasswordSchema))
+  async changePassword(@Body() dto: ChangePasswordInput, @CurrentUser() user: AdminTb) {
+    const updated = await this.adminsService.changeOwnPassword(user.admin_id, dto.current_password, dto.new_password);
+    return this.authService.issueSession(updated);
   }
 }

@@ -38,11 +38,26 @@ export const ROLE_VALUES = ['admin', 'head_admin', 'super_admin'] as const;
 export const roleSchema = z.enum(ROLE_VALUES);
 export type Role = z.infer<typeof roleSchema>;
 
+/**
+ * เบอร์โทรศัพท์มือถือไทย 10 หลักขึ้นต้น 0 - ใช้เป็นชื่อผู้ใช้ตอน login
+ * ตัดช่องว่างและขีดทิ้งก่อนตรวจ (ผู้ใช้พิมพ์ 092-432-0342 ก็ได้)
+ */
+export const phoneSchema = z
+  .string()
+  .trim()
+  .transform((value) => value.replace(/[\s-]/g, ''))
+  .pipe(z.string().regex(/^0\d{9}$/, 'เบอร์โทรศัพท์ต้องเป็นตัวเลข 10 หลักขึ้นต้นด้วย 0'));
+
 /** ข้อมูลเต็มของบัญชีแอดมิน (ไม่มี password) ใช้ทั้งตอน login response และหน้าจัดการบัญชี */
 export const adminAccountSchema = z.object({
   admin_id: z.number().int(),
   full_name: z.string(),
-  email: z.string().email(),
+  /** เบอร์โทรคือชื่อผู้ใช้ - บัญชีเก่าก่อนเปลี่ยนระบบอาจยังไม่มี */
+  phone: z.string().nullable().optional(),
+  /** อีเมลเป็นข้อมูลเสริม ไม่ใช้ login แล้ว */
+  email: z.string().email().nullable().optional(),
+  /** true = ต้องเปลี่ยนรหัสผ่านก่อนใช้งานส่วนอื่นของระบบ */
+  must_change_password: z.boolean().optional(),
   role: roleSchema,
   is_active: z.boolean(),
   /** null = super admin (เห็น/จัดการตั๋วได้ทุกแผนก), ไม่ null = แอดมินแผนกนั้น */
@@ -55,8 +70,10 @@ export const adminAccountListSchema = z.array(adminAccountSchema);
 
 export const createAdminSchema = z.object({
   full_name: z.string().trim().min(1, 'กรุณากรอกชื่อ-นามสกุล'),
-  email: z.string().trim().email('อีเมลไม่ถูกต้อง'),
-  password: z.string().min(6, 'รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร'),
+  phone: phoneSchema,
+  email: z.string().trim().email('อีเมลไม่ถูกต้อง').nullish(),
+  /** รหัสผ่านชั่วคราว - ผู้ใช้ถูกบังคับให้เปลี่ยนตอน login ครั้งแรก */
+  password: z.string().min(8, 'รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร'),
   department_id: z.number().int().optional(),
   role: roleSchema.default('admin'),
 });
@@ -74,13 +91,26 @@ export const updateDepartmentSchema = z.object({
 export type UpdateDepartmentInput = z.infer<typeof updateDepartmentSchema>;
 
 export const resetPasswordSchema = z.object({
-  new_password: z.string().min(6, 'รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร'),
+  new_password: z.string().min(8, 'รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร'),
 });
 export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;
 
+/** เปลี่ยนรหัสผ่านของตัวเอง (บังคับตอน login ครั้งแรก) - ต้องยืนยันรหัสเดิมและรหัสใหม่ต้องไม่ซ้ำเดิม */
+export const changePasswordSchema = z
+  .object({
+    current_password: z.string().min(1, 'กรุณากรอกรหัสผ่านปัจจุบัน'),
+    new_password: z.string().min(8, 'รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร'),
+  })
+  .refine((value) => value.new_password !== value.current_password, {
+    message: 'รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสผ่านเดิม',
+    path: ['new_password'],
+  });
+export type ChangePasswordInput = z.infer<typeof changePasswordSchema>;
+
 export const updateProfileSchema = z.object({
   full_name: z.string().trim().min(1, 'กรุณากรอกชื่อผู้ใช้'),
-  email: z.string().trim().email('อีเมลไม่ถูกต้อง'),
+  phone: phoneSchema,
+  email: z.string().trim().email('อีเมลไม่ถูกต้อง').nullish(),
 });
 export type UpdateProfileInput = z.infer<typeof updateProfileSchema>;
 
@@ -99,9 +129,79 @@ export const TICKET_STATUS_VALUES = [
 export const ticketStatusSchema = z.enum(TICKET_STATUS_VALUES);
 export type TicketStatus = z.infer<typeof ticketStatusSchema>;
 
+/**
+ * สเปก 2.2: ผู้ใช้เห็นเพียง 4 สถานะหลัก - สถานะภายในที่เหลือถูกแมปเข้าหลักเหล่านี้
+ * และแสดงเป็นป้ายรอง (ส่งต่อทีมอื่น / ปิดงานแล้ว) แทนการเพิ่มสถานะที่ 5-6
+ */
+export const PRIMARY_STATUS_VALUES = ['open', 'in_progress', 'waiting', 'resolved'] as const;
+export const primaryStatusSchema = z.enum(PRIMARY_STATUS_VALUES);
+export type PrimaryStatus = z.infer<typeof primaryStatusSchema>;
+
+export const PRIMARY_STATUS_LABEL_TH: Record<PrimaryStatus, string> = {
+  open: 'ใหม่',
+  in_progress: 'กำลังดำเนินการ',
+  waiting: 'รอข้อมูลผู้แจ้ง',
+  resolved: 'แก้ไขแล้ว',
+};
+
+/** ป้ายรองสำหรับสถานะภายในที่ไม่ใช่ 4 สถานะหลัก (ไม่สร้างสถานะที่ 5/6 ให้ผู้ใช้เห็น) */
+export const STATUS_SECONDARY_LABEL_TH: Partial<Record<TicketStatus, string>> = {
+  forwarded: 'ส่งต่อทีมอื่น',
+  closed: 'ปิดงานแล้ว',
+};
+
+export function primaryStatusOf(status: TicketStatus): PrimaryStatus {
+  switch (status) {
+    case 'open':
+      return 'open';
+    case 'in_progress':
+    case 'forwarded':
+      // ส่งต่อแล้วยังเป็นงานที่กำลังดำเนินการโดยทีมใหม่
+      return 'in_progress';
+    case 'waiting':
+      return 'waiting';
+    case 'pending_confirmation':
+    case 'closed':
+      return 'resolved';
+    default:
+      return 'open';
+  }
+}
+
+/**
+ * ตาราง transition ที่ระบบรองรับจริง (SSOT) - ทุกจุดที่เปลี่ยนสถานะต้องอยู่ในตารางนี้
+ * closed เป็นปลายทางสุดท้าย เปิดใหม่ได้เฉพาะจาก pending_confirmation
+ */
+export const TICKET_STATUS_TRANSITIONS: Record<TicketStatus, readonly TicketStatus[]> = {
+  open: ['in_progress', 'waiting', 'forwarded', 'pending_confirmation', 'closed'],
+  in_progress: ['in_progress', 'waiting', 'forwarded', 'pending_confirmation', 'closed'],
+  waiting: ['in_progress', 'forwarded', 'pending_confirmation', 'closed'],
+  forwarded: ['in_progress', 'waiting', 'forwarded', 'pending_confirmation', 'closed'],
+  pending_confirmation: ['in_progress', 'pending_confirmation', 'closed'],
+  closed: [],
+};
+
+export function canTransition(from: TicketStatus, to: TicketStatus): boolean {
+  return TICKET_STATUS_TRANSITIONS[from].includes(to);
+}
+
 export const TICKET_PRIORITY_VALUES = ['normal', 'urgent'] as const;
 export const ticketPrioritySchema = z.enum(TICKET_PRIORITY_VALUES);
 export type TicketPriority = z.infer<typeof ticketPrioritySchema>;
+
+/** Priority สำหรับการคัดแยกโดยเจ้าหน้าที่ ไม่ใช่ผลกระทบเร่งด่วนจากฟอร์มเดิม */
+export const TICKET_TRIAGE_PRIORITIES = ['p1', 'p2', 'p3', 'p4'] as const;
+export const ticketTriagePrioritySchema = z.enum(TICKET_TRIAGE_PRIORITIES);
+export type TicketTriagePriority = z.infer<typeof ticketTriagePrioritySchema>;
+export const DEFAULT_TICKET_TRIAGE_PRIORITY: TicketTriagePriority = 'p3';
+export const TRIAGE_PRIORITY_LABEL_TH: Record<TicketTriagePriority, string> = {
+  p1: 'P1 วิกฤต',
+  p2: 'P2 สูง',
+  p3: 'P3 ปกติ',
+  p4: 'P4 ต่ำ',
+};
+export const changeTriagePrioritySchema = z.object({ triage_priority: ticketTriagePrioritySchema }).strict();
+export type ChangeTriagePriorityInput = z.infer<typeof changeTriagePrioritySchema>;
 
 export const TICKET_IMPACT_LEVEL_VALUES = [
   'individual',
@@ -121,13 +221,17 @@ export const TICKET_STATUS_ORDER: Record<TicketStatus, number> = {
   closed: 5,
 };
 
+/**
+ * ข้อความสถานะตามสเปก 2.2: ใหม่ → กำลังดำเนินการ ↔ รอข้อมูลผู้แจ้ง → แก้ไขแล้ว
+ * สถานะภายในที่ระบบยังใช้ (forwarded/closed) แสดงเป็นข้อความเสริมที่อ่านรู้เรื่อง
+ */
 export const STATUS_LABEL_TH: Record<TicketStatus, string> = {
-  open: 'รอดำเนินการ',
+  open: 'ใหม่',
   in_progress: 'กำลังดำเนินการ',
-  waiting: 'รอแก้ไข',
-  forwarded: 'ส่งต่อแล้ว',
-  pending_confirmation: 'รอผู้แจ้งยืนยัน',
-  closed: 'เสร็จสิ้น',
+  waiting: 'รอข้อมูลผู้แจ้ง',
+  forwarded: 'ส่งต่อทีมอื่น',
+  pending_confirmation: 'แก้ไขแล้ว',
+  closed: 'ปิดงานแล้ว',
 };
 
 export const PRIORITY_LABEL_TH: Record<TicketPriority, string> = {
@@ -210,6 +314,7 @@ export const ticketSchema = z.object({
   department: departmentSchema,
   department_id: z.number().int(),
   priority: ticketPrioritySchema,
+  triage_priority: ticketTriagePrioritySchema,
   urgent_detail: z.string().nullable(),
   impact_level: ticketImpactLevelSchema.nullable(),
   deadline_note: z.string().nullable(),
@@ -223,6 +328,8 @@ export const ticketSchema = z.object({
   description: z.string().nullable(),
   custom_department_note: z.string().nullable(),
   status: ticketStatusSchema,
+  /** สถานะหลัก 4 ค่าตามสเปก 2.2 ซึ่ง UI ใช้แสดง (คำนวณฝั่งเซิร์ฟเวอร์) */
+  primary_status: primaryStatusSchema.optional(),
   assignee: adminUserSchema.nullable().optional(),
   assignee_id: z.number().int().nullable(),
   resolution_note: z.string().nullable(),
@@ -230,6 +337,33 @@ export const ticketSchema = z.object({
   assign_by: dateOrIsoString.nullable(),
   resolve_by: dateOrIsoString.nullable(),
   sla_breached: z.boolean(),
+  /** SLA "ตอบผู้แจ้งครั้งแรก" - คำนวณฝั่งเซิร์ฟเวอร์ตามนโยบาย Priority/ปฏิทิน */
+  first_response_due_at: dateOrIsoString.nullable().optional(),
+  first_responded_at: dateOrIsoString.nullable().optional(),
+  resolve_due_at: dateOrIsoString.nullable().optional(),
+  first_response: z
+    .object({
+      due_at: dateOrIsoString.nullable(),
+      responded_at: dateOrIsoString.nullable(),
+      state: z.enum(['none', 'met', 'paused', 'overdue', 'due_soon', 'pending']),
+      remaining_ms: z.number().nullable(),
+      late: z.boolean(),
+      progress: z.number(),
+    })
+    .nullable()
+    .optional(),
+  resolve: z
+    .object({
+      due_at: dateOrIsoString.nullable(),
+      resolved_at: dateOrIsoString.nullable(),
+      state: z.enum(['none', 'met', 'paused', 'overdue', 'due_soon', 'pending']),
+      remaining_ms: z.number().nullable(),
+      late: z.boolean(),
+      progress: z.number(),
+      paused: z.boolean(),
+    })
+    .nullable()
+    .optional(),
   assign_breach_notified_at: dateOrIsoString.nullable(),
   deadline_warning_notified_at: dateOrIsoString.nullable(),
   deadline_breach_notified_at: dateOrIsoString.nullable(),
@@ -305,7 +439,66 @@ export type SymptomSuggestion = z.infer<typeof symptomSuggestionSchema>;
  * ส่งมาแบบ multipart/form-data (เพราะแนบไฟล์ได้) ทุก field จึงมาถึง backend เป็น string เสมอ
  * แม้แต่ enum และตัวเลข - preprocess คืนค่าที่ backend รับจริงจาก multer ก่อน parse
  */
-export const createTicketSchema = z
+export const createTicketSchema = z.object({
+  /** เติมจาก LINE profile อัตโนมัติ - บังคับเฉพาะกรณีที่ไม่มีชื่อจากบัญชี */
+  full_name: z
+    .string()
+    .trim()
+    .max(200, 'ชื่อผู้แจ้งต้องไม่เกิน 200 ตัวอักษร')
+    .optional(),
+  /** ค่าเริ่มต้น "ไม่แน่ใจ" (แผนก other) เมื่อผู้แจ้งไม่เลือก */
+  department_id: z.coerce.number().int('กรุณาเลือกแผนก').optional(),
+  contact: z.string().trim().max(200, 'ช่องทางติดต่อกลับต้องไม่เกิน 200 ตัวอักษร').optional(),
+  location: z.string().max(200, 'สถานที่ต้องไม่เกิน 200 ตัวอักษร').optional(),
+  subject: z
+    .string()
+    .trim()
+    .min(1, 'กรุณากรอกหัวข้อรายการ')
+    .max(300, 'หัวข้อรายการต้องไม่เกิน 300 ตัวอักษร'),
+  /** ช่องบังคับที่สองของผู้แจ้ง: รายละเอียด/ผลกระทบ */
+  description: z
+    .string()
+    .trim()
+    .min(1, 'กรุณาอธิบายรายละเอียดหรือผลกระทบของปัญหา')
+    .max(2000, 'รายละเอียดปัญหาต้องไม่เกิน 2000 ตัวอักษร'),
+  /** ระบุชื่อแผนกเอง - ไม่บังคับแล้ว (ผู้แจ้งไม่ต้องรู้ว่าเรื่องนี้ควรส่งทีมไหน) */
+  custom_department_note: z
+    .string()
+    .max(100, 'ชื่อแผนกที่ระบุต้องไม่เกิน 100 ตัวอักษร')
+    .optional(),
+  /** อาการที่พบบ่อยที่ติ๊กเลือก - multipart ส่งมาเป็น string เดี่ยวได้ถ้าเลือกแค่ 1 อัน จึงต้อง normalize เป็น array เสมอ */
+  selected_symptoms: z.preprocess(
+    (value) => (Array.isArray(value) ? value : value ? [value] : []),
+    z
+      .array(z.string().trim().min(1).max(80))
+      .max(5, 'เลือกอาการที่พบบ่อยได้ไม่เกิน 5 ข้อ')
+      .refine(
+        (items) => new Set(items).size === items.length,
+        'อาการที่เลือกต้องไม่ซ้ำกัน',
+      ),
+  ),
+  /** ทุกตั๋วต้องผูกกับผู้แจ้งที่ LINE ยืนยันแล้ว ป้องกัน anonymous spam/สวมรอย */
+  line_id_token: z
+    .string()
+    .trim()
+    .min(20, 'กรุณาเข้าสู่ระบบ LINE ใหม่อีกครั้ง'),
+  /** กันกดส่งฟอร์มซ้ำ (double-submit / network retry) และบังคับรูปแบบที่เดายาก */
+  idempotency_key: z.string().uuid('รหัสป้องกันการส่งซ้ำไม่ถูกต้อง'),
+});
+export type CreateTicketInput = z.infer<typeof createTicketSchema>;
+
+/** Admin uses the same validated ticket fields but authenticates with JWT,
+ * so LINE identity and client idempotency are not part of its DTO contract. */
+/**
+ * ใช้เฉพาะ endpoint ที่แอดมิน (login ด้วย JWT อยู่แล้ว) เป็นคนสร้างตั๋วแทนผู้แจ้งเอง
+ * เช่น รับแจ้งทางโทรศัพท์/walk-in - ไม่มี LINE identity ให้ verify จึงตัด line_id_token/idempotency_key ออก
+ * ผลคือตั๋วที่สร้างทางนี้จะมี user_id เป็น null เสมอ (ไม่ผูกกับผู้แจ้ง LINE คนไหน จึงไม่เข้า flow
+ * เช็คตั๋วซ้ำ/แท็บติดตามสถานะ/ยืนยันปิดงานของผู้แจ้ง - แอดมินต้องเป็นคนปิดงานให้เองผ่านหน้า resolve ปกติ)
+ *
+ * ประกาศฟิลด์เองแทนการ derive จาก createTicketSchema เพราะฟอร์มผู้แจ้งเหลือสองช่องบังคับแล้ว
+ * แต่ฟอร์มแอดมินยังต้องกรอกชื่อ แผนก ช่องทางติดต่อ และระดับความเร่งด่วนครบตามเดิม
+ */
+export const adminCreateTicketSchema = z
   .object({
     full_name: z.string().trim().min(1, 'กรุณากรอกชื่อ-นามสกุลผู้แจ้ง'),
     department_id: z.coerce.number().int('กรุณาเลือกแผนก'),
@@ -353,17 +546,14 @@ export const createTicketSchema = z
       .trim()
       .min(1, 'กรุณากรอกหัวข้อรายการ')
       .max(300, 'หัวข้อรายการต้องไม่เกิน 300 ตัวอักษร'),
-    // เดิมไม่มี MaxLength - คนที่ยิง API ตรงๆ ใส่ข้อความยาวแค่ไหนก็ได้ เสี่ยงฐานข้อมูลบวมจากตั๋วสแปม
     description: z
       .string()
       .max(2000, 'รายละเอียดปัญหาต้องไม่เกิน 2000 ตัวอักษร')
       .optional(),
-    /** ระบุชื่อแผนกเอง - บังคับกรอกเฉพาะตอนเลือกแผนก "อื่นๆ" เท่านั้น (ตรวจซ้ำที่ service เพราะต้องรู้ department_code) */
     custom_department_note: z
       .string()
       .max(100, 'ชื่อแผนกที่ระบุต้องไม่เกิน 100 ตัวอักษร')
       .optional(),
-    /** อาการที่พบบ่อยที่ติ๊กเลือก - multipart ส่งมาเป็น string เดี่ยวได้ถ้าเลือกแค่ 1 อัน จึงต้อง normalize เป็น array เสมอ */
     selected_symptoms: z.preprocess(
       (value) => (Array.isArray(value) ? value : value ? [value] : []),
       z
@@ -374,68 +564,6 @@ export const createTicketSchema = z
           'อาการที่เลือกต้องไม่ซ้ำกัน',
         ),
     ),
-    /** ทุกตั๋วต้องผูกกับผู้แจ้งที่ LINE ยืนยันแล้ว ป้องกัน anonymous spam/สวมรอย */
-    line_id_token: z
-      .string()
-      .trim()
-      .min(20, 'กรุณาเข้าสู่ระบบ LINE ใหม่อีกครั้ง'),
-    /** กันกดส่งฟอร์มซ้ำ (double-submit / network retry) และบังคับรูปแบบที่เดายาก */
-    idempotency_key: z.string().uuid('รหัสป้องกันการส่งซ้ำไม่ถูกต้อง'),
-  })
-  .superRefine((data, ctx) => {
-    // บังคับกรอกเฉพาะตอนเลือก "เร่งด่วน" (เทียบเท่า @ValidateIf เดิม)
-    if (data.priority === 'urgent') {
-      if (!data.urgent_detail || data.urgent_detail.trim().length < 10) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['urgent_detail'],
-          message: 'กรุณาระบุเหตุผลที่เร่งด่วนอย่างน้อย 10 ตัวอักษร',
-        });
-      }
-      if (!data.impact_level) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['impact_level'],
-          message: 'กรุณาเลือกระดับผลกระทบจากปัญหานี้',
-        });
-      }
-      if (!data.urgent_phone?.trim()) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['urgent_phone'],
-          message: 'กรุณากรอกเบอร์โทรศัพท์ที่ติดต่อได้ทันที',
-        });
-      }
-    } else if (
-      data.urgent_detail?.trim() ||
-      data.impact_level ||
-      data.deadline_note?.trim() ||
-      data.deadline_date ||
-      data.urgent_phone?.trim()
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['priority'],
-        message: 'ข้อมูลเร่งด่วนใช้ได้เฉพาะตั๋วระดับเร่งด่วนเท่านั้น',
-      });
-    }
-  });
-export type CreateTicketInput = z.infer<typeof createTicketSchema>;
-
-/** Admin uses the same validated ticket fields but authenticates with JWT,
- * so LINE identity and client idempotency are not part of its DTO contract. */
-/**
- * ใช้เฉพาะ endpoint ที่แอดมิน (login ด้วย JWT อยู่แล้ว) เป็นคนสร้างตั๋วแทนผู้แจ้งเอง
- * เช่น รับแจ้งทางโทรศัพท์/walk-in - ไม่มี LINE identity ให้ verify จึงตัด line_id_token/idempotency_key ออก
- * ผลคือตั๋วที่สร้างทางนี้จะมี user_id เป็น null เสมอ (ไม่ผูกกับผู้แจ้ง LINE คนไหน จึงไม่เข้า flow
- * เช็คตั๋วซ้ำ/แท็บติดตามสถานะ/ยืนยันปิดงานของผู้แจ้ง - แอดมินต้องเป็นคนปิดงานให้เองผ่านหน้า resolve ปกติ)
- * โครงสร้างฟิลด์อื่นทั้งหมดใช้ร่วมกับ createTicketSchema เพื่อไม่ให้ validation เพี้ยนไปจากฟอร์ม user
- */
-export const adminCreateTicketSchema = createTicketSchema
-  .innerType()
-  .omit({
-    line_id_token: true,
-    idempotency_key: true,
   })
   .superRefine((data, ctx) => {
     if (data.priority === 'urgent') {
@@ -520,8 +648,16 @@ export const myTicketSummaryListSchema = z.array(myTicketSummarySchema);
 
 // ---------------- Auth and chat input schemas ----------------
 
+/**
+ * username = เบอร์โทรศัพท์ (ตัดช่องว่าง/ขีดออก) - ยังรับอีเมลได้ชั่วคราวเพื่อไม่ให้บัญชีเก่าที่ยังไม่มีเบอร์
+ * ถูกล็อกออก ตัวที่มี @ จะถูกมองเป็นอีเมลและแปลงเป็นตัวพิมพ์เล็ก
+ */
 export const loginSchema = z.object({
-  email: z.string().trim().toLowerCase().email('อีเมลไม่ถูกต้อง'),
+  username: z
+    .string()
+    .trim()
+    .min(1, 'กรุณากรอกเบอร์โทรศัพท์')
+    .transform((value) => (value.includes('@') ? value.toLowerCase() : value.replace(/[\s-]/g, ''))),
   password: z.string().min(1, 'กรุณากรอกรหัสผ่าน'),
 });
 export type LoginInput = z.infer<typeof loginSchema>;
@@ -536,5 +672,7 @@ export type RegisterInput = z.infer<typeof registerSchema>;
 
 export const sendTicketMessageSchema = z.object({
   message: z.string().trim().min(1, 'กรุณาพิมพ์ข้อความก่อนส่ง').max(2000),
+  /** กันกดส่งซ้ำ/network retry: คีย์เดิมที่ส่งซ้ำจะคืนข้อความเดิม ไม่สร้างข้อความซ้ำ */
+  idempotency_key: z.string().uuid('รหัสป้องกันการส่งซ้ำไม่ถูกต้อง').optional(),
 });
 export type SendTicketMessageInput = z.infer<typeof sendTicketMessageSchema>;

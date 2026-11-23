@@ -21,7 +21,7 @@ export class AdminsRepository {
 
   async findAll(): Promise<AdminTb[]> {
     return this.adminsRepo.find({
-      select: ['admin_id', 'full_name', 'email', 'role', 'is_active', 'department_id', 'created_at', 'updated_at'],
+      select: ['admin_id', 'full_name', 'phone', 'email', 'must_change_password', 'role', 'is_active', 'department_id', 'created_at', 'updated_at'],
       order: { created_at: 'ASC' },
     });
   }
@@ -34,12 +34,27 @@ export class AdminsRepository {
     return this.adminsRepo.findOne({ where: { email } });
   }
 
-  /** ใช้เฉพาะตอน login เท่านั้น เพราะเป็นที่เดียวที่ต้องใช้ password hash */
-  async findByEmailWithPassword(email: string): Promise<AdminTb | null> {
+  async findByPhone(phone: string): Promise<AdminTb | null> {
+    return this.adminsRepo.findOne({ where: { phone } });
+  }
+
+  /**
+   * ใช้ตอน login (เบอร์โทร หรืออีเมลของบัญชีเก่า) และตอนเปลี่ยนรหัสผ่านเท่านั้น
+   * เพราะเป็นที่เดียวที่ต้องใช้ password hash
+   */
+  async findByUsernameWithPassword(username: string): Promise<AdminTb | null> {
+    const query = this.adminsRepo.createQueryBuilder('user').addSelect('user.password');
+    if (username.includes('@')) {
+      return query.where('LOWER(user.email) = :email', { email: username.toLowerCase().trim() }).getOne();
+    }
+    return query.where('user.phone = :phone', { phone: username.trim() }).getOne();
+  }
+
+  async findByIdWithPassword(admin_id: number): Promise<AdminTb | null> {
     return this.adminsRepo
       .createQueryBuilder('user')
       .addSelect('user.password')
-      .where('LOWER(user.email) = :email', { email: email.toLowerCase().trim() })
+      .where('user.admin_id = :admin_id', { admin_id })
       .getOne();
   }
 

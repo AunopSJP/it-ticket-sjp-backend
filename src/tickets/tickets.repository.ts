@@ -1,14 +1,18 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { EntityManager, LessThan, Not, Repository, SelectQueryBuilder } from 'typeorm';
+import type { TicketTriagePriority } from '@it-ticket/shared';
+import { TICKET_TRIAGE_PRIORITIES } from '@it-ticket/shared';
 import { TicketTb } from './entities/ticket.entity';
 import { TicketImageTb } from './entities/ticket-image.entity';
 import { TicketHistoryTb } from './entities/ticket-history.entity';
 import { TicketCommentTb } from './entities/ticket-comment.entity';
+import { TicketAttachmentTb } from './entities/ticket-attachment.entity';
 import { TicketStatus } from '../common/enums/ticket-status.enum';
 import { TicketPriority } from '../common/enums/ticket-priority.enum';
 
-export type AdminTicketSort = 'newest' | 'department' | 'priority' | 'oldest_pending';
+export type AdminTicketSort = 'newest' | 'department' | 'priority' | 'oldest_pending' | 'sla';
 
 export interface AdminTicketFilter {
   status?: TicketStatus;
@@ -17,6 +21,7 @@ export interface AdminTicketFilter {
   assignee_id?: number | null;
   keyword?: string;
   priority?: TicketPriority;
+  triage_priority?: TicketTriagePriority;
   sort?: AdminTicketSort;
   /** true = กรองเฉพาะตั๋วที่ sla_breached = true และยังไม่ปิด (ใช้ตอนกดการ์ดสรุป "เกินกำหนด SLA" หน้า dashboard) */
   sla_breached_only?: boolean;
@@ -69,6 +74,8 @@ export class TicketsRepository {
     private readonly imagesRepo: Repository<TicketImageTb>,
     @InjectRepository(TicketCommentTb)
     private readonly commentsRepo: Repository<TicketCommentTb>,
+    @InjectRepository(TicketAttachmentTb)
+    private readonly attachmentsRepo: Repository<TicketAttachmentTb>,
   ) {}
 
   private repo(manager?: EntityManager): Repository<TicketTb> {
@@ -101,6 +108,18 @@ export class TicketsRepository {
 
   saveTicket(ticket: TicketTb, manager?: EntityManager): Promise<TicketTb> {
     return this.repo(manager).save(ticket);
+  }
+
+  /**
+   * อัปเดตเฉพาะคอลัมน์ที่ระบุ ไม่เขียนทับฟิลด์อื่น - ใช้กับ background job ที่ถือ snapshot เก่า
+   * (save() ทั้ง entity จะเขียนสถานะ/ผู้รับผิดชอบเก่าทับสิ่งที่แอดมินเพิ่งแก้)
+   */
+  async updateFields(
+    ticket_id: string,
+    fields: Partial<TicketTb>,
+    manager?: EntityManager,
+  ): Promise<void> {
+    await this.repo(manager).update({ ticket_id }, fields as QueryDeepPartialEntity<TicketTb>);
   }
 
   createHistory(data: Partial<TicketHistoryTb>, manager: EntityManager): TicketHistoryTb {
@@ -182,6 +201,9 @@ export class TicketsRepository {
     if (filter.priority) {
       qb.andWhere('ticket.priority = :priority', { priority: filter.priority });
     }
+    if (filter.triage_priority) {
+      qb.andWhere('ticket.triage_priority = :triage_priority', { triage_priority: filter.triage_priority });
+    }
     if (filter.keyword) {
       qb.andWhere(
         '(ticket.ticket_no ILIKE :kw OR ticket.full_name ILIKE :kw OR ticket.subject ILIKE :kw)',
@@ -217,15 +239,25 @@ export class TicketsRepository {
         qb.orderBy('department.department_name_th', 'ASC').addOrderBy('ticket.created_at', 'DESC');
         break;
       case 'priority':
-        // ค่ามาจาก TicketPriority.URGENT เสมอ (ไม่พิมพ์ string ตรงๆ ซ้ำ) แต่ยังต้องเป็น SQL string literal
-        // ในนี้เพราะ TypeORM ไม่รองรับ parameter binding ใน orderBy() ราว (CASE expression)
+        // คิวใช้ Priority ที่เจ้าหน้าที่คัดแยก (P1-P4) ไม่ใช่ค่า urgent/normal เดิมที่ผูกกับ SLA
         qb
-          .orderBy('CASE ticket.ticket_priority WHEN :urgent_priority THEN 0 ELSE 1 END', 'ASC')
-          .setParameter('urgent_priority', TicketPriority.URGENT)
-          .addOrderBy(
-          'ticket.created_at',
-          'DESC',
-          );
+          .orderBy(
+            `CASE ticket.ticket_triage_priority WHEN :p1 THEN 0 WHEN :p2 THEN 1 WHEN :p3 THEN 2 ELSE 3 END`,
+            'ASC',
+          )
+          .setParameter('p1', TICKET_TRIAGE_PRIORITIES[0])
+          .setParameter('p2', TICKET_TRIAGE_PRIORITIES[1])
+          .setParameter('p3', TICKET_TRIAGE_PRIORITIES[2])
+          .addOrderBy('ticket.updated_at', 'DESC');
+        break;
+      case 'sla':
+        // เรียงด้วยคอลัมน์จริงเท่านั้น (TypeORM แปล CASE/LEAST ใน orderBy ไม่ได้บน Postgres)
+        // คอลัมน์ due ของเป้าหมายที่บรรลุแล้วถูกตั้งเป็น NULL ตอนตอบ/ปิด จึงเหลือเฉพาะเป้าหมายที่ยังเปิด
+        qb
+          .orderBy('ticket.sla_breached', 'DESC')
+          .addOrderBy('ticket.first_response_due_at', 'ASC', 'NULLS LAST')
+          .addOrderBy('ticket.resolve_due_at', 'ASC', 'NULLS LAST')
+          .addOrderBy('ticket.updated_at', 'DESC');
         break;
       case 'oldest_pending':
         qb
@@ -244,6 +276,9 @@ export class TicketsRepository {
     const qb = this.ticketsRepo
       .createQueryBuilder('ticket')
       .leftJoinAndSelect('ticket.department', 'department')
+      // ต้อง join ผู้รับผิดชอบด้วย: หน้าติดตามสถานะของผู้แจ้งตัดสินจาก assignee_name ว่าจะโชว์ "เจ้าหน้าที่ X กำลังดูแล"
+      // หรือ "อยู่ในคิวรอรับเรื่อง" (เดิมไม่ join จึงขึ้นว่ารอคิวตลอดแม้ตั๋วมีคนรับแล้ว)
+      .leftJoinAndSelect('ticket.assignee', 'assignee')
       .orderBy('ticket.created_at', 'DESC')
       .limit(30)
       .where('ticket.user_id = :user_id', { user_id });
@@ -298,6 +333,17 @@ export class TicketsRepository {
       where: { ticket_id },
       order: { created_at: 'ASC' },
     });
+  }
+
+  listCommentAttachments(ticket_comment_ids: number[]): Promise<TicketAttachmentTb[]> {
+    if (ticket_comment_ids.length === 0) return Promise.resolve([]);
+    return this.attachmentsRepo.find({
+      where: ticket_comment_ids.map((ticket_comment_id) => ({ ticket_comment_id })),
+    });
+  }
+
+  saveAttachments(rows: Partial<TicketAttachmentTb>[]): Promise<TicketAttachmentTb[]> {
+    return this.attachmentsRepo.save(this.attachmentsRepo.create(rows));
   }
 
   createComment(data: Partial<TicketCommentTb>): TicketCommentTb {

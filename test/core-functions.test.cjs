@@ -91,11 +91,13 @@ test('sanitizeRequestPath removes bearer-like query tokens from logs and respons
 });
 
 test('shared auth schemas validate and normalize login input', () => {
-  assert.deepEqual(loginSchema.parse({ email: ' Admin@Example.com ', password: 'secret' }), {
-    email: 'admin@example.com',
+  assert.deepEqual(loginSchema.parse({ username: ' 092-432 0342 ', password: 'secret' }), {
+    username: '0924320342',
     password: 'secret',
   });
-  assert.throws(() => loginSchema.parse({ email: 'not-an-email', password: '' }));
+  // อีเมลของบัญชีเก่ายังใช้ login ได้ชั่วคราว (ตัวที่มี @ ถูกแปลงเป็นตัวพิมพ์เล็ก)
+  assert.equal(loginSchema.parse({ username: ' Admin@Example.com ', password: 'x' }).username, 'admin@example.com');
+  assert.throws(() => loginSchema.parse({ username: '', password: '' }));
 });
 
 test('shared register schema validates optional department input', () => {

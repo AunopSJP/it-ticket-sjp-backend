@@ -17,6 +17,7 @@ import { NotificationTb } from '../notifications/notification.entity';
 import { UserTb } from '../users/user.entity';
 import { UserNotificationTb } from '../notifications/user-notification.entity';
 import { Role } from '../common/enums/role.enum';
+import { INITIAL_ADMINS } from './initial-admins';
 
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
@@ -120,15 +121,6 @@ const DEPARTMENT_POPULAR_SYMPTOMS: Record<string, Array<{ label: string; hit_cou
 };
 
 async function run() {
-  const adminEmail = (process.env.SEED_ADMIN_EMAIL || '').toLowerCase().trim();
-  const seedPassword = process.env.SEED_ADMIN_PASSWORD || '';
-  if (!adminEmail || !seedPassword) {
-    throw new Error('SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD are required; refusing to use default credentials');
-  }
-  if (seedPassword.length < 12) {
-    throw new Error('SEED_ADMIN_PASSWORD must be at least 12 characters');
-  }
-
   const dataSource = new DataSource({
     type: 'postgres',
     host: requiredEnv('DB_HOST'),
@@ -205,30 +197,32 @@ async function run() {
   }
   console.log('✅ เพิ่มอาการยอดนิยมตั้งต้นของแต่ละแผนกแล้ว');
 
-  const userRepo = dataSource.getRepository(AdminTb);
-  const existingAdmin = await userRepo.findOne({ where: { email: adminEmail } });
-  if (existingAdmin) {
-    if (existingAdmin.role !== Role.SUPER_ADMIN || existingAdmin.department_id !== null) {
-      await userRepo.update(
-        { admin_id: existingAdmin.admin_id },
-        { role: Role.SUPER_ADMIN, department_id: null },
-      );
-      console.log(`🔐 ยกระดับบัญชี "${adminEmail}" เป็น super admin แล้ว`);
-    } else {
-      console.log(`↷ ข้ามบัญชีแอดมิน "${adminEmail}" (เป็น super admin อยู่แล้ว)`);
+  const adminRepo = dataSource.getRepository(AdminTb);
+  for (const initial of INITIAL_ADMINS) {
+    const existing = await adminRepo.findOne({ where: { phone: initial.phone } });
+    if (existing) {
+      // ไม่แตะรหัสผ่าน/ชื่อของบัญชีที่มีอยู่แล้ว - เจ้าของอาจเปลี่ยนรหัสไปแล้ว รัน seed ซ้ำต้องไม่เขียนทับ
+      // (ยืนยันแค่ว่ายังเป็น super admin ที่ไม่ผูกแผนก)
+      if (existing.role !== Role.SUPER_ADMIN || existing.department_id !== null) {
+        await adminRepo.update({ admin_id: existing.admin_id }, { role: Role.SUPER_ADMIN, department_id: null });
+        console.log(`🔐 ยกระดับบัญชี ${initial.phone} เป็น super admin แล้ว`);
+      } else {
+        console.log(`↷ ข้ามบัญชีแอดมิน ${initial.phone} (มีอยู่แล้ว)`);
+      }
+      continue;
     }
-  } else {
-    const hashedPassword = await bcrypt.hash(seedPassword, 10);
-    await userRepo.save(
-      userRepo.create({
-        full_name: requiredEnv('SEED_ADMIN_NAME'),
-        email: adminEmail,
-        password: hashedPassword,
-        role: Role.SUPER_ADMIN,
+    await adminRepo.save(
+      adminRepo.create({
+        full_name: initial.full_name,
+        phone: initial.phone,
+        email: null,
+        password: await bcrypt.hash(initial.temporary_password, 10),
+        must_change_password: true,
+        role: initial.role,
+        department_id: null,
       }),
     );
-    console.log(`✅ สร้างบัญชีแอดมิน "${adminEmail}" แล้ว`);
-    console.log('   กรุณาเปลี่ยนรหัสผ่านหลัง login ครั้งแรก');
+    console.log(`✅ สร้างบัญชีแอดมิน ${initial.phone} แล้ว (ต้องเปลี่ยนรหัสผ่านตอน login ครั้งแรก)`);
   }
 
   await dataSource.destroy();

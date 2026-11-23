@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import * as bcrypt from 'bcryptjs';
 import { AdminTb } from './admin.entity';
@@ -46,23 +47,44 @@ export class AdminsService {
     return user;
   }
 
-  /** ใช้เฉพาะตอน login เท่านั้น เพราะเป็นที่เดียวที่ต้องใช้ password hash */
-  async findByEmailWithPassword(email: string): Promise<AdminTb | null> {
-    return this.adminsRepo.findByEmailWithPassword(email);
+  /** ใช้เฉพาะตอน login (เบอร์โทร หรืออีเมลของบัญชีเก่า) เพราะต้องใช้ password hash */
+  async findByUsernameWithPassword(username: string): Promise<AdminTb | null> {
+    return this.adminsRepo.findByUsernameWithPassword(username);
   }
 
-  async create(dto: CreateAdminInput, role: Role = Role.ADMIN): Promise<AdminTb> {
-    const email = dto.email.toLowerCase().trim();
-    const existing = await this.adminsRepo.findByEmail(email);
-    if (existing) {
-      throw new ConflictException('อีเมลนี้ถูกใช้งานแล้ว');
+  private normalizeEmail(email: string | null | undefined): string | null {
+    const value = email?.toLowerCase().trim();
+    return value ? value : null;
+  }
+
+  private async assertContactUnique(phone: string, email: string | null, exceptAdminId?: number): Promise<void> {
+    const byPhone = await this.adminsRepo.findByPhone(phone);
+    if (byPhone && byPhone.admin_id !== exceptAdminId) {
+      throw new ConflictException('เบอร์โทรศัพท์นี้ถูกใช้งานแล้ว');
     }
+    if (email) {
+      const byEmail = await this.adminsRepo.findByEmail(email);
+      if (byEmail && byEmail.admin_id !== exceptAdminId) {
+        throw new ConflictException('อีเมลนี้ถูกใช้งานแล้ว');
+      }
+    }
+  }
+
+  /**
+   * บัญชีที่ออกให้โดยผู้ดูแลระบบใช้รหัสผ่านชั่วคราว - must_change_password = true เสมอ
+   * ให้เจ้าของบัญชีตั้งรหัสเองตอน login ครั้งแรก (ผู้ออกบัญชีรู้รหัสชั่วคราวเท่านั้น)
+   */
+  async create(dto: CreateAdminInput, role: Role = Role.ADMIN): Promise<AdminTb> {
+    const email = this.normalizeEmail(dto.email);
+    await this.assertContactUnique(dto.phone, email);
 
     const hashedPassword = await bcrypt.hash(dto.password, BCRYPT_SALT_ROUNDS);
     const user = this.adminsRepo.create({
       full_name: dto.full_name,
+      phone: dto.phone,
       email,
       password: hashedPassword,
+      must_change_password: true,
       role,
       department_id: dto.department_id ?? null,
     });
@@ -130,18 +152,16 @@ export class AdminsService {
   async updateProfile(
     admin_id: number,
     full_name: string,
-    email: string,
+    phone: string,
+    email: string | null | undefined,
     requestingUser: AdminTb,
   ): Promise<AdminTb> {
     await this.managedAdmin(admin_id, requestingUser);
 
-    const normalizedEmail = email.toLowerCase().trim();
-    const existing = await this.adminsRepo.findByEmail(normalizedEmail);
-    if (existing && existing.admin_id !== admin_id) {
-      throw new ConflictException('อีเมลนี้ถูกใช้งานแล้ว');
-    }
+    const normalizedEmail = this.normalizeEmail(email);
+    await this.assertContactUnique(phone, normalizedEmail, admin_id);
 
-    await this.adminsRepo.updateFields(admin_id, { full_name, email: normalizedEmail });
+    await this.adminsRepo.updateFields(admin_id, { full_name, phone, email: normalizedEmail });
     return this.findById(admin_id);
   }
 
@@ -154,7 +174,23 @@ export class AdminsService {
     await this.managedAdmin(admin_id, requestingUser);
 
     const hashedPassword = await bcrypt.hash(new_password, BCRYPT_SALT_ROUNDS);
-    await this.adminsRepo.updateFields(admin_id, { password: hashedPassword });
+    // รหัสที่ผู้ดูแลตั้งให้เป็นรหัสชั่วคราว - เจ้าของบัญชีต้องเปลี่ยนเองตอน login ครั้งถัดไป
+    await this.adminsRepo.updateFields(admin_id, { password: hashedPassword, must_change_password: true });
+    return this.findById(admin_id);
+  }
+
+  /**
+   * เปลี่ยนรหัสผ่านของตัวเอง (ใช้ตอนถูกบังคับเปลี่ยนครั้งแรก) - ต้องยืนยันรหัสเดิมก่อนเสมอ
+   * ไม่ผ่าน managedAdmin เพราะเป็นบัญชีของตัวเอง
+   */
+  async changeOwnPassword(admin_id: number, current_password: string, new_password: string): Promise<AdminTb> {
+    const user = await this.adminsRepo.findByIdWithPassword(admin_id);
+    if (!user) throw new NotFoundException('ไม่พบผู้ใช้งานนี้');
+    if (!(await bcrypt.compare(current_password, user.password))) {
+      throw new UnauthorizedException('รหัสผ่านปัจจุบันไม่ถูกต้อง');
+    }
+    const hashedPassword = await bcrypt.hash(new_password, BCRYPT_SALT_ROUNDS);
+    await this.adminsRepo.updateFields(admin_id, { password: hashedPassword, must_change_password: false });
     return this.findById(admin_id);
   }
 

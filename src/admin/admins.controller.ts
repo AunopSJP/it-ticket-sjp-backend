@@ -68,7 +68,7 @@ export class AdminsController {
     @Body() dto: UpdateProfileInput,
     @CurrentUser() requestingUser: AdminTb,
   ) {
-    return this.adminsService.updateProfile(id, dto.full_name, dto.email, requestingUser);
+    return this.adminsService.updateProfile(id, dto.full_name, dto.phone, dto.email, requestingUser);
   }
 
   @Patch(':id/department')

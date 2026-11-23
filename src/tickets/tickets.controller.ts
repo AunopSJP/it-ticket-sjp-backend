@@ -17,6 +17,7 @@ import {
 import { FilesInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiConsumes, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
+import { ChangeTriagePriorityInput, changeTriagePrioritySchema, ticketTriagePrioritySchema } from '@it-ticket/shared';
 import { TicketsService } from './tickets.service';
 import { CreateTicketDto, createTicketSchema } from './dto/create-ticket.dto';
 import { AdminCreateTicketDto, adminCreateTicketSchema } from './dto/admin-create-ticket.dto';
@@ -125,6 +126,7 @@ export class TicketsController {
     @Query('assignee_id') assignee_id?: string,
     @Query('keyword') keyword?: string,
     @Query('priority') priority?: TicketPriority,
+    @Query('triage_priority') triagePriority?: string,
     @Query('sort') sort?: AdminTicketSort,
     // 'true' เท่านั้นที่นับ - ใช้ตอนกดการ์ดสรุป "เกินกำหนด SLA" บนหน้า dashboard เพื่อดึงเฉพาะตั๋วที่ยัง
     // ไม่ปิดและเกินกำหนดอยู่จริงตอนนี้ (ไม่พึ่งพา filter.status เพราะ sla_breached ไม่ใช่ status)
@@ -137,6 +139,8 @@ export class TicketsController {
   ) {
     const page = parsePositiveQueryInt(pageQuery, 'page', 1, 1_000_000);
     const page_size = parsePositiveQueryInt(pageSizeQuery, 'page_size', 30, 100);
+    const triage = ticketTriagePrioritySchema.optional().safeParse(triagePriority);
+    if (!triage.success) throw new BadRequestException('Priority ต้องเป็น p1, p2, p3 หรือ p4');
     return this.ticketsService.findAllForAdmin(admin, {
       status,
       department_id: department_id !== undefined ? Number(department_id) : undefined,
@@ -144,6 +148,7 @@ export class TicketsController {
       assignee_id: assignee_id === undefined ? undefined : assignee_id === 'unassigned' ? null : Number(assignee_id),
       keyword,
       priority,
+      triage_priority: triage.data,
       sort,
       sla_breached_only: sla_breached_only === 'true',
       date_from: date_from ? new Date(`${date_from}T00:00:00`) : undefined,
@@ -158,6 +163,27 @@ export class TicketsController {
     return this.ticketsService.findByIdForAdmin(id, admin);
   }
 
+  /** เปิดเคสที่รอผู้แจ้งยืนยันกลับไปดำเนินการต่อ (สเปก 2.2) */
+  @Patch(':id/reopen')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @Throttle(THROTTLE_STANDARD)
+  reopen(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() admin: AdminTb) {
+    return this.ticketsService.reopen(id, admin);
+  }
+
+  @Patch(':id/priority')  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @Throttle(THROTTLE_STANDARD)
+  @UsePipes(new ZodValidationPipe(changeTriagePrioritySchema))
+  changePriority(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ChangeTriagePriorityInput,
+    @CurrentUser() admin: AdminTb,
+  ) {
+    return this.ticketsService.changeTriagePriority(id, dto.triage_priority, admin);
+  }
+
   @Get(':id/comments')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
@@ -167,15 +193,22 @@ export class TicketsController {
 
   @Post(':id/comments')
   @Throttle(THROTTLE_STANDARD)
+  @ApiConsumes('multipart/form-data')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
-  @UsePipes(new ZodValidationPipe(createTicketCommentSchema))
+  @UseInterceptors(FilesInterceptor('files', 5, { limits: { files: 5, fileSize: 5 * 1024 * 1024 } }))
   addComment(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: CreateTicketCommentDto,
     @CurrentUser() admin: AdminTb,
+    @UploadedFiles() files: Express.Multer.File[],
   ) {
-    return this.ticketsService.addComment(id, dto, admin);
+    // multipart body ต้อง validate เอง เพราะ parameter-level UsePipes จะไปตรวจ @Query/@Param ด้วย
+    const parsed = createTicketCommentSchema.safeParse(dto);
+    if (!parsed.success) {
+      throw new BadRequestException(parsed.error.issues[0]?.message ?? 'ข้อมูลบันทึกไม่ถูกต้อง');
+    }
+    return this.ticketsService.addComment(id, parsed.data, admin, files ?? []);
   }
 
   /** ไม่มี body ให้แนบรูปด้วยไม่ได้ (assign ไม่มีฟิลด์ note ให้กรอกในฟอร์ม UI) - คงเป็น JSON endpoint เดิม */

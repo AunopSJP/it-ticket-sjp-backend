@@ -1,4 +1,4 @@
-import { MiddlewareConsumer, Module, NestModule } from "@nestjs/common";
+﻿import { MiddlewareConsumer, Module, NestModule } from "@nestjs/common";
 import { APP_GUARD } from "@nestjs/core";
 import { ConfigModule, ConfigService } from "@nestjs/config";
 import { TypeOrmModule } from "@nestjs/typeorm";
@@ -26,6 +26,7 @@ import { UserNotificationTb } from "./notifications/user-notification.entity";
 import { AuditLogTb } from "./audit/audit-log.entity";
 import { TicketCommentTb } from "./tickets/entities/ticket-comment.entity";
 import { TicketMessageTb } from "./tickets/entities/ticket-message.entity";
+import { TicketAttachmentTb } from "./tickets/entities/ticket-attachment.entity";
 import { TicketChatModule } from "./ticket-chat/ticket-chat.module";
 import { SseModule } from "./common/sse/sse.module";
 import { RequestIdMiddleware } from "./common/middleware/request-id.middleware";
@@ -78,6 +79,7 @@ import { RequestIdMiddleware } from "./common/middleware/request-id.middleware";
           AuditLogTb,
           TicketCommentTb,
           TicketMessageTb,
+          TicketAttachmentTb,
         ],
         // production ใช้ database/schema.sql สร้างตารางแทน - NODE_ENV=production บังคับปิด
         // synchronize เสมอไม่ว่า DB_SYNCHRONIZE จะเป็นอะไร กันเผลอ sync ทับตารางจริง

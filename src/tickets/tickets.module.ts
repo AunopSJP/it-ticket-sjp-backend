@@ -1,4 +1,4 @@
-import { BadRequestException, Module } from '@nestjs/common';
+﻿import { BadRequestException, Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MulterModule } from '@nestjs/platform-express';
@@ -7,6 +7,7 @@ import { TicketTb } from './entities/ticket.entity';
 import { TicketImageTb } from './entities/ticket-image.entity';
 import { TicketHistoryTb } from './entities/ticket-history.entity';
 import { TicketCommentTb } from './entities/ticket-comment.entity';
+import { TicketAttachmentTb } from './entities/ticket-attachment.entity';
 import { TicketsService } from './tickets.service';
 import { TicketsRepository } from './tickets.repository';
 import { TicketImagesRepository } from './ticket-images.repository';
@@ -23,7 +24,7 @@ import { AdminsModule } from '../admin/admins.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([TicketTb, TicketImageTb, TicketHistoryTb, TicketCommentTb]),
+    TypeOrmModule.forFeature([TicketTb, TicketImageTb, TicketHistoryTb, TicketCommentTb, TicketAttachmentTb]),
     DepartmentsModule,
     SymptomsModule,
     NotificationsModule,
@@ -64,5 +65,7 @@ import { AdminsModule } from '../admin/admins.module';
   ],
   controllers: [TicketsController, TicketImageController],
   providers: [TicketsService, TicketsRepository, TicketImagesRepository, SlaSchedulerService],
+  // TicketChatService เรียก TicketsService (auto-resume/ส่งและแก้ไขแล้ว) จึงต้อง export
+  exports: [TicketsService],
 })
 export class TicketsModule {}

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { TicketMessageTb } from '../tickets/entities/ticket-message.entity';
+import { TicketAttachmentTb } from '../tickets/entities/ticket-attachment.entity';
 import { TicketTb } from '../tickets/entities/ticket.entity';
 import { TicketChatService } from './ticket-chat.service';
 import { TicketChatRepository } from './ticket-chat.repository';
@@ -10,13 +11,17 @@ import { TicketInboxController } from './ticket-inbox.controller';
 import { LineModule } from '../line/line.module';
 import { UsersModule } from '../users/users.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { StorageModule } from '../storage/storage.module';
+import { TicketsModule } from '../tickets/tickets.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([TicketMessageTb, TicketTb, AdminTb]),
+    TypeOrmModule.forFeature([TicketMessageTb, TicketAttachmentTb, TicketTb, AdminTb]),
     LineModule,
     UsersModule,
     NotificationsModule,
+    StorageModule,
+    TicketsModule,
   ],
   controllers: [TicketChatController, TicketInboxController],
   providers: [TicketChatRepository, TicketChatService],

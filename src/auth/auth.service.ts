@@ -2,6 +2,7 @@ import { Injectable, Logger, UnauthorizedException } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
 import { AdminsService } from "../admin/admins.service";
 import { LoginDto } from "./dto/login.dto";
+import { AdminTb } from "../admin/admin.entity";
 
 @Injectable()
 export class AuthService {
@@ -40,10 +41,10 @@ export class AuthService {
   ) {}
 
   async login(dto: LoginDto) {
-    const accountKey = dto.email.trim().toLowerCase();
+    const accountKey = dto.username.trim().toLowerCase();
     this.assertNotLocked(accountKey);
 
-    const user = await this.adminsService.findByEmailWithPassword(dto.email);
+    const user = await this.adminsService.findByUsernameWithPassword(dto.username);
     if (!user) {
       // นับรวมกรณีอีเมลไม่มีในระบบด้วย กันคนไล่เดาว่าอีเมลไหนมีอยู่จริงจากความเร็ว/พฤติกรรมที่ต่างกัน
       // ยังคงเรียก bcrypt.compare กับ hash หลอกเสมอ (ดู DUMMY_PASSWORD_HASH ด้านบน) แม้รู้ผลอยู่แล้วว่า
@@ -53,7 +54,7 @@ export class AuthService {
         AuthService.DUMMY_PASSWORD_HASH,
       );
       this.registerFailure(accountKey);
-      throw new UnauthorizedException("อีเมลหรือรหัสผ่านไม่ถูกต้อง");
+      throw new UnauthorizedException("เบอร์โทรศัพท์หรือรหัสผ่านไม่ถูกต้อง");
     }
     if (!user.is_active) {
       throw new UnauthorizedException(
@@ -67,18 +68,17 @@ export class AuthService {
     );
     if (!passwordValid) {
       this.registerFailure(accountKey);
-      throw new UnauthorizedException("อีเมลหรือรหัสผ่านไม่ถูกต้อง");
+      throw new UnauthorizedException("เบอร์โทรศัพท์หรือรหัสผ่านไม่ถูกต้อง");
     }
 
     this.failedAttempts.delete(accountKey);
 
-    return this.buildAuthResponse(
-      user.admin_id,
-      user.email,
-      user.full_name,
-      user.role,
-      user.department_id,
-    );
+    return this.buildAuthResponse(user);
+  }
+
+  /** ออก token ใหม่หลังเปลี่ยนรหัสผ่าน - token เดิมถูกยกเลิกแล้วเพราะ updated_at ขยับ (ดู JwtStrategy) */
+  issueSession(user: AdminTb) {
+    return this.buildAuthResponse(user);
   }
 
   private assertNotLocked(accountKey: string): void {
@@ -119,25 +119,20 @@ export class AuthService {
     }
   }
 
-  private buildAuthResponse(
-    admin_id: number,
-    email: string,
-    full_name: string,
-    role: string,
-    department_id: number | null,
-  ) {
-    const payload = { sub: admin_id, email };
+  private buildAuthResponse(user: AdminTb) {
+    const payload = { sub: user.admin_id, phone: user.phone };
     const access_token = this.jwtService.sign(payload);
     return {
       access_token,
-      // ต้องเป็น camelCase ให้ตรงกับ AdminUser interface ฝั่ง frontend เป๊ะ
-      // (เดิมเป็น snake_case ทำให้ currentUser().admin_id เป็น undefined เสมอ)
+      // ชื่อ field ต้องตรงกับ AdminUser interface ฝั่ง frontend เป๊ะ
       user: {
-        admin_id,
-        email,
-        full_name,
-        role,
-        department_id,
+        admin_id: user.admin_id,
+        phone: user.phone,
+        email: user.email,
+        full_name: user.full_name,
+        role: user.role,
+        department_id: user.department_id,
+        must_change_password: user.must_change_password,
       },
     };
   }

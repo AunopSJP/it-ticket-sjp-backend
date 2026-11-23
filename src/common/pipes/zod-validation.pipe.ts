@@ -19,7 +19,13 @@ export class ZodValidationPipe<T extends ZodTypeAny> implements PipeTransform {
   transform(value: unknown, metadata: ArgumentMetadata): unknown {
     // เฉพาะ body/query ที่ผูก schema นี้เท่านั้นที่ต้อง validate - params (เช่น :id) ใช้ ParseUUIDPipe ของตัวเองอยู่แล้ว
     // และ 'custom' (เช่น @UploadedFiles()) ต้องข้าม ไม่งั้นจะเอา array ของไฟล์ไป validate กับ schema ผิดตัว
-    if (metadata.type !== 'body' && metadata.type !== 'query') {
+    //
+    // query ตรวจเฉพาะกรณีรับทั้งก้อน `@Query()` (metadata.data ว่าง) - `@Query('line_id_token')` เป็นค่าเดี่ยว
+    // ไม่ใช่ object ที่ schema นี้อธิบายอยู่ ถ้าตรวจด้วย จะได้ "Expected object, received string" ทุกครั้ง
+    // (บั๊กจริง: ผู้แจ้งส่งข้อความแชทไม่ได้เลย เพราะ POST /tickets/:id/chat/user มีทั้ง body และ ?line_id_token=)
+    const validatesWholeValue =
+      metadata.type === 'body' || (metadata.type === 'query' && metadata.data === undefined);
+    if (!validatesWholeValue) {
       return value;
     }
     const result = this.schema.safeParse(value);

@@ -1,22 +1,27 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
   NotFoundException,
   Param,
+  ParseIntPipe,
   ParseUUIDPipe,
   Patch,
   Post,
   Query,
+  Res,
   Sse,
+  UploadedFiles,
   UseGuards,
-  UsePipes,
+  UseInterceptors,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { FilesInterceptor } from '@nestjs/platform-express';
+import { ApiBearerAuth, ApiConsumes, ApiTags } from '@nestjs/swagger';
+import { Response } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { Observable, of } from 'rxjs';
 import { TicketChatService } from './ticket-chat.service';
-import { SendTicketMessageDto } from './dto/send-ticket-message.dto';
 import { LineVerifyService } from '../line/line-verify.service';
 import { UserNotificationsService } from '../users/user-notifications.service';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
@@ -25,8 +30,17 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { AdminTb } from '../admin/admin.entity';
 import { TicketMessageTb } from '../tickets/entities/ticket-message.entity';
 import { THROTTLE_RELAXED, THROTTLE_STANDARD } from '../common/constants/throttle.constants';
-import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe';
-import { sendTicketMessageSchema } from './dto/send-ticket-message.dto';
+import { sendTicketMessageSchema, SendTicketMessageInput } from './dto/send-ticket-message.dto';
+
+/** multipart form fields arrive as strings - validate with the shared schema explicitly
+ *  (a parameter-level UsePipes would also try to validate the single @Query token) */
+function parseSendTicketMessage(body: unknown): SendTicketMessageInput {
+  const result = sendTicketMessageSchema.safeParse(body);
+  if (!result.success) {
+    throw new BadRequestException(result.error.issues[0]?.message ?? 'ข้อมูลข้อความไม่ถูกต้อง');
+  }
+  return result.data;
+}
 
 /**
  * แชทผูกกับตั๋วงาน 1 ใบ - แยก route ฝั่งผู้แจ้ง (verify ผ่าน line_id_token) กับฝั่งแอดมิน (JwtAuthGuard)
@@ -77,14 +91,40 @@ export class TicketChatController {
 
   @Post('user')
   @Throttle(THROTTLE_STANDARD)
-  @UsePipes(new ZodValidationPipe(sendTicketMessageSchema))
+  @ApiConsumes('multipart/form-data')
+  @UseInterceptors(FilesInterceptor('files', 5, { limits: { files: 5, fileSize: 5 * 1024 * 1024 } }))
   async sendFromUser(
     @Param('ticket_id', ParseUUIDPipe) ticket_id: string,
     @Query('line_id_token') line_id_token: string,
-    @Body() dto: SendTicketMessageDto,
+    @Body() body: unknown,
+    @UploadedFiles() files: Express.Multer.File[],
   ) {
     const user_id = await this.resolveUserId(line_id_token, { throwOnInvalid: true });
-    return this.ticketChatService.sendFromUser(ticket_id, user_id!, dto.message);
+    const dto = parseSendTicketMessage(body);
+    return this.ticketChatService.sendFromUser(
+      ticket_id,
+      user_id!,
+      dto.message,
+      files ?? [],
+      dto.idempotency_key,
+    );
+  }
+
+  /** ไฟล์แนบของข้อความ - ผู้แจ้งเห็นได้เฉพาะไฟล์ของข้อความ ไม่ใช่ไฟล์ของบันทึกภายใน */
+  @Get('user/attachments/:attachment_id')
+  @Throttle(THROTTLE_RELAXED)
+  async downloadAttachmentForUser(
+    @Param('attachment_id', ParseIntPipe) attachment_id: number,
+    @Query('line_id_token') line_id_token: string,
+    @Res() response: Response,
+  ) {
+    const user_id = await this.resolveUserId(line_id_token, { throwOnInvalid: true });
+    const file = await this.ticketChatService.readReporterAttachment(attachment_id, user_id!);
+    response.setHeader('Content-Type', file.content_type);
+    response.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(file.original_name)}"`);
+    response.setHeader('X-Content-Type-Options', 'nosniff');
+    response.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+    response.send(file.buffer);
   }
 
   @Patch('user/read')
@@ -150,15 +190,61 @@ export class TicketChatController {
 
   @Post('admin')
   @Throttle(THROTTLE_STANDARD)
-  @UsePipes(new ZodValidationPipe(sendTicketMessageSchema))
+  @ApiConsumes('multipart/form-data')
+  @UseInterceptors(FilesInterceptor('files', 5, { limits: { files: 5, fileSize: 5 * 1024 * 1024 } }))
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
   async sendFromAdmin(
     @Param('ticket_id', ParseUUIDPipe) ticket_id: string,
     @CurrentUser() admin: AdminTb,
-    @Body() dto: SendTicketMessageDto,
+    @Body() body: unknown,
+    @UploadedFiles() files: Express.Multer.File[],
   ) {
-    return this.ticketChatService.sendFromAdmin(ticket_id, admin.admin_id, dto.message);
+    const dto = parseSendTicketMessage(body);
+    return this.ticketChatService.sendFromAdmin(
+      ticket_id,
+      admin.admin_id,
+      dto.message,
+      files ?? [],
+      dto.idempotency_key,
+    );
+  }
+
+  /** "ส่งและแก้ไขแล้ว" - ส่งคำตอบแล้วพาตั๋วไปรอผู้แจ้งยืนยันในครั้งเดียว (สเปก 2.4) */
+  @Post('admin/reply-and-resolve')
+  @Throttle(THROTTLE_STANDARD)
+  @ApiConsumes('multipart/form-data')
+  @UseInterceptors(FilesInterceptor('files', 5, { limits: { files: 5, fileSize: 5 * 1024 * 1024 } }))
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  async sendAndResolve(
+    @Param('ticket_id', ParseUUIDPipe) ticket_id: string,
+    @CurrentUser() admin: AdminTb,
+    @Body() body: unknown,
+    @UploadedFiles() files: Express.Multer.File[],
+  ) {
+    const dto = parseSendTicketMessage(body);
+    return this.ticketChatService.sendAndResolve(
+      ticket_id, admin.admin_id, dto.message, files ?? [], dto.idempotency_key, admin,
+    );
+  }
+
+  /** ไฟล์แนบของบทสนทนา - ตรวจสิทธิ์เดียวกับประวัติแชท (assignee/super admin)   *  ไฟล์ของบันทึกภายในใช้สิทธิ์การจัดการตั๋ว (ดู readAdminAttachment) */
+  @Get('attachments/:attachment_id')
+  @Throttle(THROTTLE_RELAXED)
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  async downloadAttachment(
+    @Param('attachment_id', ParseIntPipe) attachment_id: number,
+    @CurrentUser() admin: AdminTb,
+    @Res() response: Response,
+  ) {
+    const file = await this.ticketChatService.readAdminAttachment(attachment_id, admin);
+    response.setHeader('Content-Type', file.content_type);
+    response.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(file.original_name)}"`);
+    response.setHeader('X-Content-Type-Options', 'nosniff');
+    response.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+    response.send(file.buffer);
   }
 
   @Patch('admin/read')

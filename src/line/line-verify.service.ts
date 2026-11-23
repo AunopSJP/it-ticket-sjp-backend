@@ -163,6 +163,13 @@ export class LineVerifyService {
         signal: AbortSignal.timeout(5_000),
       });
 
+      // 429/5xx = ฝั่ง LINE มีปัญหาหรือจำกัดอัตรา ไม่ใช่ token ผิด - ห้ามเข้า negative cache
+      // ไม่งั้นผู้ใช้จริงที่ token ถูกต้องจะโดนปฏิเสธต่ออีก 60 วินาทีหลัง LINE กลับมาปกติ
+      if (res.status === 429 || res.status >= 500) {
+        this.logger.warn(`LINE verify ตอบ ${res.status} - ถือเป็นข้อผิดพลาดชั่วคราว`);
+        throw new LineVerifyTransientError();
+      }
+
       const data: unknown = await res.json();
 
       if (!res.ok) {
